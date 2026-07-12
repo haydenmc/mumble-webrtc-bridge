@@ -3,7 +3,7 @@ CGO_CFLAGS := -I$(HOME)/.local/include
 CGO_LDFLAGS := -L$(HOME)/.local/lib64
 GOENV := PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_ENABLED=1
 
-.PHONY: build frontend run docker clean
+.PHONY: build frontend run podman clean
 
 build: frontend
 	$(GOENV) go build -o bridge-server .
@@ -14,8 +14,8 @@ frontend:
 run: build
 	MUMBLE_HOST=localhost $(GOENV) ./bridge-server
 
-docker:
-	docker build -t mumble-webrtc-bridge .
+podman:
+	podman build -t mumble-webrtc-bridge .
 
 clean:
 	rm -f bridge-server
