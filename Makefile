@@ -1,22 +1,20 @@
-PKG_CONFIG_PATH := $(HOME)/.local/lib64/pkgconfig
-CGO_CFLAGS := -I$(HOME)/.local/include
-CGO_LDFLAGS := -L$(HOME)/.local/lib64
-GOENV := PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_ENABLED=1
+.PHONY: build run dev clean
 
-.PHONY: build frontend run podman clean
-
-build: frontend
-	$(GOENV) go build -o bridge-server .
-
-frontend:
-	cd frontend && npm install && npm run build
-
-run: build
-	MUMBLE_HOST=localhost $(GOENV) ./bridge-server
-
-podman:
+# Build the container image (frontend + Go compiled inside podman)
+build:
 	podman build -t mumble-webrtc-bridge .
 
+# Run the built image against a local Mumble server for testing
+run:
+	podman run --rm -p 8080:8080 \
+		-e MUMBLE_HOST=$(MUMBLE_HOST) \
+		-e MUMBLE_PASSWORD=$(MUMBLE_PASSWORD) \
+		mumble-webrtc-bridge
+
+# Frontend dev server only (Vite hot-reload, no Go needed)
+dev:
+	cd frontend && npm install && npm run dev
+
 clean:
-	rm -f bridge-server
+	podman rmi -f mumble-webrtc-bridge 2>/dev/null || true
 	rm -rf frontend/dist
