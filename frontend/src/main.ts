@@ -54,6 +54,27 @@ function createClient(): MumbleWebRTCClient {
   )
 }
 
+// --- Persist credentials ---
+const STORAGE_KEY = 'mumble-bridge-credentials'
+
+function loadCredentials(): void {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+    if (!saved) return
+    const { username, password } = JSON.parse(saved)
+    if (username) usernameInput.value = username
+    if (password) passwordInput.value = password
+  } catch {
+    // ignore malformed storage
+  }
+}
+
+function saveCredentials(username: string, password: string): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ username, password }))
+}
+
+loadCredentials()
+
 // --- Login ---
 loginForm.addEventListener('submit', (e) => {
   e.preventDefault()
@@ -61,6 +82,7 @@ loginForm.addEventListener('submit', (e) => {
   const password = passwordInput.value
   if (!username) return
 
+  saveCredentials(username, password)
   loginError.classList.add('hidden')
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
