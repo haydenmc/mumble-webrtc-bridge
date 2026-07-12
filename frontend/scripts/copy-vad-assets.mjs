@@ -13,6 +13,8 @@ const files = [
   'node_modules/@ricky0123/vad-web/dist/silero_vad_v5.onnx',
   'node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js',
   'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm',
+  // Companion JS loader the wasm backend dynamically imports at runtime.
+  'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs',
 ]
 
 for (const src of files) {
