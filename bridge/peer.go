@@ -408,6 +408,9 @@ func (p *Peer) onMumbleConnect(e *gumble.ConnectEvent) {
 		}
 	}
 	p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: names}))
+	if e.WelcomeMessage != nil && *e.WelcomeMessage != "" {
+		p.sendWS(mustMarshal(textMsg{Type: "text", From: "", Message: *e.WelcomeMessage}))
+	}
 }
 
 func (p *Peer) onUserChange(e *gumble.UserChangeEvent) {
