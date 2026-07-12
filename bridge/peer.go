@@ -127,6 +127,11 @@ func (p *Peer) handleLogin(username, password string) error {
 			p.close()
 		},
 		TextMessage: func(e *gumble.TextMessageEvent) {
+			// Drop server-generated ChannelListener warnings — our client doesn't
+			// support the feature, but it doesn't affect bridge functionality.
+			if e.Sender == nil && strings.Contains(e.Message, "ChannelListener") {
+				return
+			}
 			sender := ""
 			if e.Sender != nil {
 				sender = e.Sender.Name
@@ -393,9 +398,16 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 }
 
 // onMumbleConnect is called once the Mumble handshake completes.
+// p.mumble is not yet assigned at this point (DialWithDialer hasn't returned),
+// so we read the user list directly from the ConnectEvent's client.
 func (p *Peer) onMumbleConnect(e *gumble.ConnectEvent) {
-	users := p.channelUsers()
-	p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: users}))
+	names := []string{}
+	if e.Client != nil && e.Client.Self != nil && e.Client.Self.Channel != nil {
+		for _, u := range e.Client.Self.Channel.Users {
+			names = append(names, u.Name)
+		}
+	}
+	p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: names}))
 }
 
 func (p *Peer) onUserChange(e *gumble.UserChangeEvent) {
