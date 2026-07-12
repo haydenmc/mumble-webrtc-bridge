@@ -319,29 +319,44 @@ func (p *Peer) handleMute(muted bool) {
 // OnAudioStream implements gumble.AudioListener. Called once per speaking user per stream.
 func (p *Peer) OnAudioStream(e *gumble.AudioStreamEvent) {
 	go func() {
+		// pos tracks this stream's write offset within the current 20ms mix
+		// window. Mumble senders commonly use sub-20ms Opus frames (10ms by
+		// default), so a single window can be filled by more than one
+		// packet from the same user; without a running offset each packet
+		// would land at index 0 and overwrite/overlap the previous one
+		// instead of being placed after it.
+		pos := 0
 		for pkt := range e.C {
-			p.addPCM([]int16(pkt.AudioBuffer))
+			pos = p.addPCM([]int16(pkt.AudioBuffer), pos)
 		}
 	}()
 }
 
-// addPCM mixes incoming PCM into the 20ms accumulator buffer.
-func (p *Peer) addPCM(pcm []int16) {
+// addPCM mixes incoming PCM into the 20ms accumulator buffer at the given
+// per-stream write offset (samples already written by this stream since the
+// last full window) and returns the updated offset. Concurrent streams
+// (multiple simultaneous speakers) start each window at offset 0, so their
+// contributions are summed at matching time offsets as intended.
+func (p *Peer) addPCM(pcm []int16, pos int) int {
 	const frameSize = 960 // 20ms at 48kHz
 	p.mixMu.Lock()
 	defer p.mixMu.Unlock()
 	if p.mixBuf == nil {
 		p.mixBuf = make([]int16, frameSize)
 	}
-	for i := 0; i < len(pcm) && i < frameSize; i++ {
-		s := int32(p.mixBuf[i]) + int32(pcm[i])
+	if pos >= frameSize {
+		pos = 0
+	}
+	for i := 0; i < len(pcm) && pos+i < frameSize; i++ {
+		s := int32(p.mixBuf[pos+i]) + int32(pcm[i])
 		if s > 32767 {
 			s = 32767
 		} else if s < -32768 {
 			s = -32768
 		}
-		p.mixBuf[i] = int16(s)
+		p.mixBuf[pos+i] = int16(s)
 	}
+	return pos + len(pcm)
 }
 
 // runMixer fires every 20ms, encodes the mixed PCM buffer, and writes to the WebRTC track.
@@ -392,6 +407,8 @@ func (p *Peer) runMixer() {
 
 // readBrowserAudio reads Opus RTP from the browser and sends it directly to Mumble.
 func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
+	var haveSeq bool
+	var lastRTPSeq uint16
 	for {
 		rtp, _, err := track.ReadRTP()
 		if err != nil {
@@ -400,7 +417,27 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 		if p.muted.Load() || p.mumble == nil {
 			continue
 		}
-		seq := p.seqNum.Add(1) - 1
+
+		// Advance the Mumble sequence number by the real RTP gap so a
+		// browser->bridge packet loss shows up to the receiving Opus
+		// decoders as a gap (letting them apply loss concealment) instead
+		// of being silently smoothed into a continuous stream, which
+		// otherwise produces audible glitches for other Mumble users.
+		delta := int64(1)
+		if haveSeq {
+			gap := rtp.SequenceNumber - lastRTPSeq // uint16 wraparound arithmetic
+			if gap == 0 || gap > 0x8000 {
+				// Duplicate, or old/out-of-order relative to what we already
+				// forwarded; skip it rather than feeding a stateful Opus
+				// decoder audio out of order.
+				continue
+			}
+			delta = int64(gap)
+		}
+		haveSeq = true
+		lastRTPSeq = rtp.SequenceNumber
+
+		seq := p.seqNum.Add(delta) - 1
 		if err := p.mumble.Conn.WriteAudio(4, 0, seq, false, rtp.Payload, nil, nil, nil); err != nil {
 			log.Printf("peer %s: write audio: %v", p.id, err)
 			return
