@@ -18,7 +18,7 @@ RUN CGO_ENABLED=1 go build -o bridge-server .
 
 # Stage 3: minimal runtime image
 FROM alpine:3.21
-RUN apk add --no-cache opus ca-certificates
+RUN apk add --no-cache opus opusfile ca-certificates
 WORKDIR /app
 COPY --from=builder /app/bridge-server /app/bridge-server
 EXPOSE 8080
