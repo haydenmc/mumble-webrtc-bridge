@@ -10,7 +10,6 @@ build:
 run:
 	podman run --rm --network=host \
 		-e MUMBLE_HOST=$(MUMBLE_HOST) \
-		-e MUMBLE_PASSWORD=$(MUMBLE_PASSWORD) \
 		mumble-webrtc-bridge
 
 # Frontend dev server only (Vite hot-reload, no Go needed)

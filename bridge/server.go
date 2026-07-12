@@ -19,20 +19,18 @@ type ICEConfig struct {
 
 // Server manages the set of active bridge peers.
 type Server struct {
-	mumbleAddr     string
-	mumblePassword string
-	mumbleChannel  string
-	ice            ICEConfig
+	mumbleAddr    string
+	mumbleChannel string
+	ice           ICEConfig
 
 	mu    sync.Mutex
 	peers map[string]*Peer
 }
 
-func NewServer(mumbleAddr, mumblePassword, mumbleChannel string, ice ICEConfig) *Server {
+func NewServer(mumbleAddr, mumbleChannel string, ice ICEConfig) *Server {
 	return &Server{
-		mumbleAddr:     mumbleAddr,
-		mumblePassword: mumblePassword,
-		mumbleChannel:  mumbleChannel,
+		mumbleAddr:    mumbleAddr,
+		mumbleChannel: mumbleChannel,
 		ice:            ice,
 		peers:          make(map[string]*Peer),
 	}
