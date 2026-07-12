@@ -148,7 +148,10 @@ export class MumbleWebRTCClient {
       }
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      video: false,
+    })
     const [micTrack] = stream.getAudioTracks()
     this.micTrack = micTrack
     this.audioSender = this.pc.addTrack(micTrack, stream)
@@ -166,6 +169,9 @@ export class MumbleWebRTCClient {
       getStream: async () => stream,
       pauseStream: async () => {},
       resumeStream: async () => stream,
+      // Shorter than the library default (1400ms), which is tuned for not
+      // truncating recorded speech segments rather than snappy cutoff.
+      redemptionMs: 600,
       onSpeechStart: () => {
         this.vadSpeaking = true
         this.updateTransmission()
