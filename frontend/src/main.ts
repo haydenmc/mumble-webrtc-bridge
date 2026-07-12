@@ -17,6 +17,7 @@ const chatInput = document.getElementById('chat-input') as HTMLInputElement
 
 let client: MumbleWebRTCClient | null = null
 let muted = false
+let currentUsername = ''
 
 // --- Client setup ---
 function createClient(): MumbleWebRTCClient {
@@ -64,6 +65,7 @@ loginForm.addEventListener('submit', (e) => {
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
 
+  currentUsername = username
   client = createClient()
   client.connect(username, password)
 })
@@ -88,6 +90,7 @@ chatForm.addEventListener('submit', (e) => {
   const msg = chatInput.value.trim()
   if (!msg || !client) return
   client.sendText(msg)
+  appendMessage(currentUsername, msg)
   chatInput.value = ''
 })
 
@@ -98,6 +101,7 @@ function showLogin(): void {
   connectBtn.disabled = false
   connectBtn.textContent = 'Connect'
   muted = false
+  currentUsername = ''
   muteBtn.textContent = 'Mute'
   muteBtn.classList.remove('active')
   userList.innerHTML = ''
