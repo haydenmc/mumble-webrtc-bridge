@@ -7,10 +7,8 @@ COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: build Go binary (CGo enabled for libopus)
-FROM golang:1.24-bookworm AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libopus-dev libogg-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM golang:1.24-alpine AS builder
+RUN apk add --no-cache gcc musl-dev opus-dev opusfile-dev libogg-dev
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -19,10 +17,8 @@ COPY --from=frontend /app/frontend/dist ./frontend/dist
 RUN CGO_ENABLED=1 go build -o bridge-server .
 
 # Stage 3: minimal runtime image
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libopus0 ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+FROM alpine:3.21
+RUN apk add --no-cache opus ca-certificates
 WORKDIR /app
 COPY --from=builder /app/bridge-server /app/bridge-server
 EXPOSE 8080
