@@ -144,7 +144,7 @@ function appendMessage(from: string, message: string): void {
   label.classList.add('from')
   label.textContent = from ? `${from}: ` : ''
   const text = document.createElement('span')
-  text.textContent = message
+  text.innerHTML = message
   div.appendChild(label)
   div.appendChild(text)
   chatMessages.appendChild(div)

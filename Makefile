@@ -5,12 +5,12 @@ build:
 	podman build -t mumble-webrtc-bridge .
 
 # Run the built image against a Mumble server for testing.
-# BRIDGE_HOST must be set to an IP the browser can reach (127.0.0.1 for local).
+# --network=host lets Pion's ICE candidates use real host interfaces so
+# WebRTC UDP traffic isn't blocked by unmapped container ports.
 run:
-	podman run --rm -p 8080:8080 \
+	podman run --rm --network=host \
 		-e MUMBLE_HOST=$(MUMBLE_HOST) \
 		-e MUMBLE_PASSWORD=$(MUMBLE_PASSWORD) \
-		-e BRIDGE_HOST=$(BRIDGE_HOST) \
 		mumble-webrtc-bridge
 
 # Frontend dev server only (Vite hot-reload, no Go needed)
