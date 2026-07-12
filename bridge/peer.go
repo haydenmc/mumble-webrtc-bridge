@@ -108,7 +108,7 @@ func (p *Peer) handleMessage(raw []byte) error {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return err
 		}
-		p.muted.Store(m.Muted)
+		p.handleMute(m.Muted)
 	}
 	return nil
 }
@@ -303,6 +303,17 @@ func (p *Peer) handleText(message string) {
 		return
 	}
 	p.mumble.Self.Channel.Send(message, false)
+}
+
+// handleMute reflects manual (button) mute to other Mumble clients via the
+// self-mute flag. Automatic voice-activity gating is handled entirely
+// client-side and never reaches here.
+func (p *Peer) handleMute(muted bool) {
+	p.muted.Store(muted)
+	if p.mumble == nil || p.mumble.Self == nil {
+		return
+	}
+	p.mumble.Self.SetSelfMuted(muted)
 }
 
 // OnAudioStream implements gumble.AudioListener. Called once per speaking user per stream.

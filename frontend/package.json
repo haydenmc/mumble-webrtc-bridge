@@ -5,10 +5,14 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "node scripts/copy-vad-assets.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.4",
     "vite": "^5.4.0"
+  },
+  "dependencies": {
+    "@ricky0123/vad-web": "^0.0.30"
   }
 }

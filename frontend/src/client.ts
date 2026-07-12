@@ -1,3 +1,5 @@
+import { MicVAD } from '@ricky0123/vad-web'
+
 export type ServerMsg =
   | { type: 'connected' }
   | { type: 'error'; message: string }
@@ -22,6 +24,11 @@ export class MumbleWebRTCClient {
   private ws: WebSocket | null = null
   private pc: RTCPeerConnection | null = null
   private audioEl: HTMLAudioElement
+  private vad: MicVAD | null = null
+  private manuallyMuted = false
+  private vadSpeaking = false
+  private micTrack: MediaStreamTrack | null = null
+  private audioSender: RTCRtpSender | null = null
 
   constructor(
     private events: ClientEvents,
@@ -142,9 +149,38 @@ export class MumbleWebRTCClient {
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-    for (const track of stream.getTracks()) {
-      this.pc.addTrack(track, stream)
-    }
+    const [micTrack] = stream.getAudioTracks()
+    this.micTrack = micTrack
+    this.audioSender = this.pc.addTrack(micTrack, stream)
+
+    // Voice-activity gate: reuses the same mic stream already flowing to the
+    // peer connection rather than opening a second capture. Starts silent
+    // (like Mumble's voice-activation mode) until speech is first detected.
+    // This only controls whether audio actually leaves the browser
+    // (via replaceTrack below) — it's independent of manual mute, which is
+    // the only thing reported to the server/other Mumble users.
+    this.vad = await MicVAD.new({
+      model: 'v5',
+      baseAssetPath: '/vad/',
+      onnxWASMBasePath: '/vad/',
+      getStream: async () => stream,
+      pauseStream: async () => {},
+      resumeStream: async () => stream,
+      onSpeechStart: () => {
+        this.vadSpeaking = true
+        this.updateTransmission()
+      },
+      onSpeechEnd: () => {
+        this.vadSpeaking = false
+        this.updateTransmission()
+      },
+      onVADMisfire: () => {
+        this.vadSpeaking = false
+        this.updateTransmission()
+      },
+    })
+    this.vad.start()
+    this.updateTransmission()
 
     const offer = await this.pc.createOffer()
     await this.pc.setLocalDescription(offer)
@@ -152,7 +188,16 @@ export class MumbleWebRTCClient {
   }
 
   setMuted(muted: boolean): void {
+    this.manuallyMuted = muted
     this.send({ type: 'mute', muted })
+    this.updateTransmission()
+  }
+
+  // Stops audio leaving the browser entirely (rather than just having the
+  // server drop it) whenever manually muted or the VAD isn't hearing speech.
+  private updateTransmission(): void {
+    const shouldTransmit = !this.manuallyMuted && this.vadSpeaking
+    this.audioSender?.replaceTrack(shouldTransmit ? this.micTrack : null)
   }
 
   sendText(message: string): void {
@@ -165,6 +210,12 @@ export class MumbleWebRTCClient {
   }
 
   private cleanup(): void {
+    this.vad?.destroy()
+    this.vad = null
+    this.manuallyMuted = false
+    this.vadSpeaking = false
+    this.micTrack = null
+    this.audioSender = null
     this.pc?.close()
     this.pc = null
     this.ws?.close()
