@@ -13,6 +13,11 @@ type Config struct {
 	MumblePassword string
 	MumbleChannel  string // optional, default root
 
+	// BridgeHost is the IP/hostname the browser can reach this server on.
+	// Required when running behind NAT or in a container (e.g. 127.0.0.1
+	// for local podman, or the public IP in production).
+	BridgeHost string
+
 	TURNURLs       []string
 	TURNUsername   string
 	TURNCredential string
@@ -43,6 +48,7 @@ func loadConfig() (*Config, error) {
 
 	cfg.MumblePassword = os.Getenv("MUMBLE_PASSWORD")
 	cfg.MumbleChannel = os.Getenv("MUMBLE_CHANNEL")
+	cfg.BridgeHost = os.Getenv("BRIDGE_HOST")
 
 	if urls := os.Getenv("TURN_URLS"); urls != "" {
 		cfg.TURNURLs = strings.Split(urls, ",")

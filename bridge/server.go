@@ -9,6 +9,9 @@ import (
 
 // ICEConfig holds WebRTC ICE/TURN configuration passed to each peer.
 type ICEConfig struct {
+	// BridgeHost is the IP/hostname reachable by browsers. When set, Pion
+	// advertises it as the host candidate instead of the container-internal IP.
+	BridgeHost     string
 	TURNURLs       []string
 	TURNUsername   string
 	TURNCredential string

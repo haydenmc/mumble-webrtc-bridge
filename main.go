@@ -28,6 +28,7 @@ func main() {
 	gumble.RegisterAudioCodec(4, bridge.NewOpusCodec())
 
 	srv := bridge.NewServer(cfg.MumbleAddr(), cfg.MumblePassword, cfg.MumbleChannel, bridge.ICEConfig{
+		BridgeHost:     cfg.BridgeHost,
 		TURNURLs:       cfg.TURNURLs,
 		TURNUsername:   cfg.TURNUsername,
 		TURNCredential: cfg.TURNCredential,

@@ -182,7 +182,11 @@ func (p *Peer) setupWebRTC() error {
 		})
 	}
 
-	api := webrtc.NewAPI()
+	se := webrtc.SettingEngine{}
+	if host := p.srv.ice.BridgeHost; host != "" {
+		se.SetNAT1To1IPs([]string{host}, webrtc.ICECandidateTypeHost)
+	}
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: iceServers,
 	})
@@ -409,10 +413,10 @@ func (p *Peer) onUserChange(e *gumble.UserChangeEvent) {
 }
 
 func (p *Peer) channelUsers() []string {
+	names := []string{}
 	if p.mumble == nil || p.mumble.Self == nil || p.mumble.Self.Channel == nil {
-		return nil
+		return names
 	}
-	var names []string
 	for _, u := range p.mumble.Self.Channel.Users {
 		names = append(names, u.Name)
 	}
