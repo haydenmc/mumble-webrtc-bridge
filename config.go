@@ -27,6 +27,15 @@ type Config struct {
 	// the Mumble server.
 	MumbleForceTCP bool
 
+	// WebRTCUDPPortMin/Max bound the ephemeral UDP port range WebRTC draws
+	// ICE candidates from. Both zero (the default) leaves the range wide
+	// open, which in practice requires --network host (or equivalent) to
+	// be reachable from outside the container. Set both to a narrow range
+	// to instead publish just that range, e.g.
+	// `-p 50000-50100:50000-50100/udp`.
+	WebRTCUDPPortMin uint16
+	WebRTCUDPPortMax uint16
+
 	HTTPAddr string
 	TLSCert  string
 	TLSKey   string
@@ -67,7 +76,39 @@ func loadConfig() (*Config, error) {
 	cfg.TLSCert = os.Getenv("TLS_CERT")
 	cfg.TLSKey = os.Getenv("TLS_KEY")
 
+	portMinStr := os.Getenv("WEBRTC_UDP_PORT_MIN")
+	portMaxStr := os.Getenv("WEBRTC_UDP_PORT_MAX")
+	if (portMinStr == "") != (portMaxStr == "") {
+		return nil, fmt.Errorf("WEBRTC_UDP_PORT_MIN and WEBRTC_UDP_PORT_MAX must be set together")
+	}
+	if portMinStr != "" {
+		portMin, err := parsePort(portMinStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WEBRTC_UDP_PORT_MIN: %w", err)
+		}
+		portMax, err := parsePort(portMaxStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WEBRTC_UDP_PORT_MAX: %w", err)
+		}
+		if portMin > portMax {
+			return nil, fmt.Errorf("WEBRTC_UDP_PORT_MIN (%d) must be <= WEBRTC_UDP_PORT_MAX (%d)", portMin, portMax)
+		}
+		cfg.WebRTCUDPPortMin = portMin
+		cfg.WebRTCUDPPortMax = portMax
+	}
+
 	return cfg, nil
+}
+
+func parsePort(s string) (uint16, error) {
+	n, err := strconv.ParseUint(s, 10, 16)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("port must be between 1 and 65535")
+	}
+	return uint16(n), nil
 }
 
 func (c *Config) MumbleAddr() string {

@@ -15,6 +15,15 @@ type ICEConfig struct {
 	TURNURLs       []string
 	TURNUsername   string
 	TURNCredential string
+
+	// UDPPortMin/UDPPortMax bound the ephemeral UDP port range pion draws
+	// ICE candidates from. Both zero (the default) leaves pion's own
+	// default (1-65535) in place, which is only reasonably reachable from
+	// outside the container with --network host or similar. Setting a
+	// narrow range makes it practical to publish just that range (e.g.
+	// `-p 50000-50100:50000-50100/udp`) instead.
+	UDPPortMin uint16
+	UDPPortMax uint16
 }
 
 // Server manages the set of active bridge peers.

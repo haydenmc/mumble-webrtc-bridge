@@ -28,6 +28,8 @@ func main() {
 		TURNURLs:       cfg.TURNURLs,
 		TURNUsername:   cfg.TURNUsername,
 		TURNCredential: cfg.TURNCredential,
+		UDPPortMin:     cfg.WebRTCUDPPortMin,
+		UDPPortMax:     cfg.WebRTCUDPPortMax,
 	}, cfg.MumbleForceTCP)
 
 	// Serve compiled frontend.

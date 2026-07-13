@@ -218,6 +218,11 @@ func (p *Peer) setupWebRTC() error {
 	if host := p.srv.ice.BridgeHost; host != "" {
 		se.SetNAT1To1IPs([]string{host}, webrtc.ICECandidateTypeHost)
 	}
+	if p.srv.ice.UDPPortMin != 0 || p.srv.ice.UDPPortMax != 0 {
+		if err := se.SetEphemeralUDPPortRange(p.srv.ice.UDPPortMin, p.srv.ice.UDPPortMax); err != nil {
+			return fmt.Errorf("webrtc UDP port range: %w", err)
+		}
+	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: iceServers,
