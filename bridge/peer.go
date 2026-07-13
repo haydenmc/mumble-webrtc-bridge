@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,12 +12,32 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/hraban/opus"
+	"github.com/hayden/mumble-webrtc-bridge/internal/mumble"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
-	"layeh.com/gumble/gumble"
-	"layeh.com/gumble/gumbleutil"
 )
+
+// remoteTrackSlots is the maximum number of Mumble users this bridge will
+// relay to a browser simultaneously. Each slot is a pre-negotiated WebRTC
+// track; Mumble sessions are dynamically assigned to a free (or, if the pool
+// is full, least-recently-active) slot as they start talking. Must match
+// REMOTE_SLOTS in frontend/src/client.ts.
+const remoteTrackSlots = 5
+
+// slotIdleTimeout is how long a slot stays bound to a session after its last
+// packet before being freed for reassignment. Mumble doesn't reliably signal
+// end-of-talk-spurt for Opus, so idle detection is timing-based rather than
+// relying on the audio packet's "final" flag.
+const slotIdleTimeout = 500 * time.Millisecond
+const slotReapInterval = 250 * time.Millisecond
+
+// trackSlot binds one pooled outbound WebRTC track to whichever Mumble
+// session is currently occupying it (session 0 means free).
+type trackSlot struct {
+	track      *webrtc.TrackLocalStaticSample
+	session    uint32
+	lastActive time.Time
+}
 
 // Peer represents one browser user's bridge session.
 type Peer struct {
@@ -28,19 +47,22 @@ type Peer struct {
 
 	wsMu sync.Mutex // serializes WebSocket writes
 
-	pc       *webrtc.PeerConnection
-	outTrack *webrtc.TrackLocalStaticSample
+	pc *webrtc.PeerConnection
 
-	mumble *gumble.Client
+	mumble *mumble.Client
 
 	muted  atomic.Bool
 	seqNum atomic.Int64
 
-	// audio mixing: accumulates PCM from all speaking Mumble users
-	mixMu  sync.Mutex
-	mixBuf []int16
+	// slotsReady guards against Mumble audio arriving (on the mumble.Client's
+	// internal goroutine, which can run concurrently with handleLogin/
+	// setupWebRTC before Dial has even returned) before the track pool
+	// below has been populated.
+	slotsReady atomic.Bool
+	slotsMu    sync.Mutex
+	slots      [remoteTrackSlots]*trackSlot
 
-	closeCh chan struct{}
+	closeCh   chan struct{}
 	closeOnce sync.Once
 }
 
@@ -114,41 +136,47 @@ func (p *Peer) handleMessage(raw []byte) error {
 }
 
 func (p *Peer) handleLogin(username, password string) error {
-	mumbleCfg := gumble.NewConfig()
-	mumbleCfg.Username = username
-	mumbleCfg.Password = password
-	mumbleCfg.AudioListeners.Attach(p)
-	mumbleCfg.Listeners.Attach(gumbleutil.Listener{
-		Connect: func(e *gumble.ConnectEvent) {
-			p.onMumbleConnect(e)
+	cfg := &mumble.Config{
+		Username:   username,
+		Password:   password,
+		DisableUDP: p.srv.forceTCP,
+		// Every callback below is passed the *mumble.Client explicitly (as mc,
+		// distinct from the client variable Dial() returns below) and must
+		// use it rather than p.mumble — the handshake can complete, and
+		// OnConnect fire, from mumble.Client's internal goroutine before
+		// Dial() has even returned to handleLogin, so p.mumble is not
+		// guaranteed to be assigned yet when these run.
+		OnConnect: func(mc *mumble.Client, welcome string) {
+			p.onMumbleConnect(mc, welcome)
 		},
-		Disconnect: func(e *gumble.DisconnectEvent) {
+		OnDisconnect: func(mc *mumble.Client, err error) {
 			p.sendWS(mustMarshal(errorMsg{Type: "error", Message: "mumble disconnected"}))
 			p.close()
 		},
-		TextMessage: func(e *gumble.TextMessageEvent) {
+		OnTextMessage: func(mc *mumble.Client, from, message string) {
 			// Drop server-generated ChannelListener warnings — our client doesn't
 			// support the feature, but it doesn't affect bridge functionality.
-			if e.Sender == nil && strings.Contains(e.Message, "ChannelListener") {
+			if from == "" && strings.Contains(message, "ChannelListener") {
 				return
 			}
-			sender := ""
-			if e.Sender != nil {
-				sender = e.Sender.Name
-			}
-			p.sendWS(mustMarshal(textMsg{
-				Type:    "text",
-				From:    sender,
-				Message: e.Message,
-			}))
+			p.sendWS(mustMarshal(textMsg{Type: "text", From: from, Message: message}))
 		},
-		UserChange: func(e *gumble.UserChangeEvent) {
-			p.onUserChange(e)
+		OnUserJoined: func(mc *mumble.Client, name string) {
+			p.sendWS(mustMarshal(userEventMsg{Type: "user_joined", Username: name}))
 		},
-	})
+		OnUserLeft: func(mc *mumble.Client, name string) {
+			p.sendWS(mustMarshal(userEventMsg{Type: "user_left", Username: name}))
+		},
+		OnUserMoved: func(mc *mumble.Client) {
+			p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: mc.SelfChannelUsers()}))
+		},
+		OnAudio: func(mc *mumble.Client, session uint32, seq int64, final bool, opus []byte) {
+			p.handleMumbleAudio(session, opus)
+		},
+	}
 
 	tlsCfg := &tls.Config{InsecureSkipVerify: true} // server may use self-signed cert
-	client, err := gumble.DialWithDialer(new(net.Dialer), p.srv.mumbleAddr, mumbleCfg, tlsCfg)
+	client, err := mumble.Dial(p.srv.mumbleAddr, tlsCfg, cfg)
 	if err != nil {
 		p.sendWS(mustMarshal(errorMsg{Type: "error", Message: err.Error()}))
 		return nil // don't tear down WS, let the browser retry
@@ -157,9 +185,8 @@ func (p *Peer) handleLogin(username, password string) error {
 
 	// Optionally join a configured channel.
 	if ch := p.srv.mumbleChannel; ch != "" {
-		parts := strings.Split(ch, "/")
-		if target := client.Channels.Find(parts...); target != nil {
-			client.Self.Move(target)
+		if err := client.JoinChannel(strings.Split(ch, "/")...); err != nil {
+			log.Printf("peer %s: join channel: %v", p.id, err)
 		}
 	}
 
@@ -200,18 +227,33 @@ func (p *Peer) setupWebRTC() error {
 	}
 	p.pc = pc
 
-	// Outbound track: Mumble audio → browser.
-	outTrack, err := webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
-		"audio", "mumble",
-	)
-	if err != nil {
-		return err
+	// Outbound: a fixed pool of tracks, one per potential simultaneous
+	// Mumble speaker. Raw Opus payloads are relayed straight through — no
+	// server-side decode/mix/encode — with Mumble sessions dynamically
+	// assigned to slots as they start talking (see handleMumbleAudio). The
+	// browser plays each slot with its own <audio> element and lets the
+	// browser's own audio mixing combine them.
+	p.slotsMu.Lock()
+	for i := 0; i < remoteTrackSlots; i++ {
+		track, err := webrtc.NewTrackLocalStaticSample(
+			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
+			fmt.Sprintf("slot%d", i), "mumble",
+		)
+		if err != nil {
+			p.slotsMu.Unlock()
+			return err
+		}
+		if _, err := pc.AddTrack(track); err != nil {
+			p.slotsMu.Unlock()
+			return err
+		}
+		p.slots[i] = &trackSlot{track: track}
 	}
-	p.outTrack = outTrack
-	if _, err := pc.AddTrack(outTrack); err != nil {
-		return err
-	}
+	p.slotsMu.Unlock()
+	// Mumble audio can start arriving (via OnAudio, on the mumble.Client's
+	// internal goroutine) before this function returns — slotsReady gates
+	// handleMumbleAudio until the pool above is actually populated.
+	p.slotsReady.Store(true)
 
 	// Inbound track: browser audio → Mumble.
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
@@ -248,8 +290,7 @@ func (p *Peer) setupWebRTC() error {
 		}
 	})
 
-	// Start audio mixer.
-	go p.runMixer()
+	go p.reapSlots()
 
 	return nil
 }
@@ -299,10 +340,12 @@ func (p *Peer) handleICE(m iceMsg) error {
 }
 
 func (p *Peer) handleText(message string) {
-	if p.mumble == nil || p.mumble.Self == nil || p.mumble.Self.Channel == nil {
+	if p.mumble == nil {
 		return
 	}
-	p.mumble.Self.Channel.Send(message, false)
+	if err := p.mumble.SendChannelText(message); err != nil {
+		log.Printf("peer %s: send text: %v", p.id, err)
+	}
 }
 
 // handleMute reflects manual (button) mute to other Mumble clients via the
@@ -310,105 +353,126 @@ func (p *Peer) handleText(message string) {
 // client-side and never reaches here.
 func (p *Peer) handleMute(muted bool) {
 	p.muted.Store(muted)
-	if p.mumble == nil || p.mumble.Self == nil {
+	if p.mumble == nil {
 		return
 	}
-	p.mumble.Self.SetSelfMuted(muted)
+	if err := p.mumble.SetSelfMuted(muted); err != nil {
+		log.Printf("peer %s: set self muted: %v", p.id, err)
+	}
 }
 
-// OnAudioStream implements gumble.AudioListener. Called once per speaking user per stream.
-func (p *Peer) OnAudioStream(e *gumble.AudioStreamEvent) {
-	go func() {
-		// pos tracks this stream's write offset within the current 20ms mix
-		// window. Mumble senders commonly use sub-20ms Opus frames (10ms by
-		// default), so a single window can be filled by more than one
-		// packet from the same user; without a running offset each packet
-		// would land at index 0 and overwrite/overlap the previous one
-		// instead of being placed after it.
-		pos := 0
-		for pkt := range e.C {
-			pos = p.addPCM([]int16(pkt.AudioBuffer), pos)
-		}
-	}()
-}
-
-// addPCM mixes incoming PCM into the 20ms accumulator buffer at the given
-// per-stream write offset (samples already written by this stream since the
-// last full window) and returns the updated offset. Concurrent streams
-// (multiple simultaneous speakers) start each window at offset 0, so their
-// contributions are summed at matching time offsets as intended.
-func (p *Peer) addPCM(pcm []int16, pos int) int {
-	const frameSize = 960 // 20ms at 48kHz
-	p.mixMu.Lock()
-	defer p.mixMu.Unlock()
-	if p.mixBuf == nil {
-		p.mixBuf = make([]int16, frameSize)
-	}
-	if pos >= frameSize {
-		pos = 0
-	}
-	for i := 0; i < len(pcm) && pos+i < frameSize; i++ {
-		s := int32(p.mixBuf[pos+i]) + int32(pcm[i])
-		if s > 32767 {
-			s = 32767
-		} else if s < -32768 {
-			s = -32768
-		}
-		p.mixBuf[pos+i] = int16(s)
-	}
-	return pos + len(pcm)
-}
-
-// runMixer fires every 20ms, encodes the mixed PCM buffer, and writes to the WebRTC track.
-func (p *Peer) runMixer() {
-	const frameSize = 960
-	enc, err := opus.NewEncoder(48000, 1, opus.AppVoIP)
-	if err != nil {
-		log.Printf("peer %s: opus encoder: %v", p.id, err)
+// handleMumbleAudio relays one Mumble user's raw Opus packet to whichever
+// pooled WebRTC track their session is (or becomes) assigned to.
+func (p *Peer) handleMumbleAudio(session uint32, opus []byte) {
+	if !p.slotsReady.Load() {
+		// setupWebRTC (called after mumble.Dial returns) hasn't populated
+		// the track pool yet; drop this packet rather than race it.
 		return
 	}
+	slot := p.assignSlot(session)
+	if slot == nil {
+		return // pool exhausted; drop this speaker's audio
+	}
+	if err := slot.track.WriteSample(media.Sample{
+		Data:     opus,
+		Duration: opusFrameDuration(opus),
+	}); err != nil {
+		log.Printf("peer %s: write remote sample: %v", p.id, err)
+	}
+}
 
-	ticker := time.NewTicker(20 * time.Millisecond)
+// assignSlot returns the track slot bound to session, assigning a free (or,
+// if the pool is full, the least-recently-active) slot to it first if
+// needed.
+func (p *Peer) assignSlot(session uint32) *trackSlot {
+	p.slotsMu.Lock()
+	defer p.slotsMu.Unlock()
+
+	now := time.Now()
+	var free, lru *trackSlot
+	freeIdx, lruIdx := -1, -1
+	for i, s := range p.slots {
+		if s.session == session {
+			s.lastActive = now
+			return s
+		}
+		if s.session == 0 && free == nil {
+			free, freeIdx = s, i
+		}
+		if lru == nil || s.lastActive.Before(lru.lastActive) {
+			lru, lruIdx = s, i
+		}
+	}
+
+	target, idx := free, freeIdx
+	if target == nil {
+		target, idx = lru, lruIdx
+		if target != nil {
+			log.Printf("peer %s: track pool full, reassigning slot %d (session %d -> %d)", p.id, idx, target.session, session)
+		}
+	} else {
+		log.Printf("peer %s: assigned session %d to slot %d", p.id, session, idx)
+	}
+	if target == nil {
+		return nil
+	}
+	target.session = session
+	target.lastActive = now
+	return target
+}
+
+// reapSlots periodically frees slots that have gone quiet, so they can be
+// reassigned to a different speaker.
+func (p *Peer) reapSlots() {
+	ticker := time.NewTicker(slotReapInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-p.closeCh:
 			return
 		case <-ticker.C:
-			p.mixMu.Lock()
-			frame := p.mixBuf
-			p.mixBuf = nil
-			p.mixMu.Unlock()
-
-			if frame == nil {
-				continue
+			p.slotsMu.Lock()
+			now := time.Now()
+			for _, s := range p.slots {
+				if s.session != 0 && now.Sub(s.lastActive) > slotIdleTimeout {
+					s.session = 0
+				}
 			}
-			if len(frame) < frameSize {
-				padded := make([]int16, frameSize)
-				copy(padded, frame)
-				frame = padded
-			}
-
-			opusData, err := encodeOpus(enc, frame)
-			if err != nil {
-				log.Printf("peer %s: encode: %v", p.id, err)
-				continue
-			}
-			if p.outTrack != nil {
-				_ = p.outTrack.WriteSample(media.Sample{
-					Data:     opusData,
-					Duration: 20 * time.Millisecond,
-				})
-			}
+			p.slotsMu.Unlock()
 		}
 	}
 }
 
 // readBrowserAudio reads Opus RTP from the browser and sends it directly to Mumble.
+// talkSpurtGapThreshold bounds how long a gap between browser RTP packets
+// can be before it's treated as a fresh talk spurt (the client's VAD pausing
+// transmission via replaceTrack(null) between utterances) rather than real
+// network loss within a continuous stream. VAD only cuts transmission after
+// its redemption window (600ms of silence, see frontend/src/client.ts), so
+// any gap shorter than that is assumed to be ordinary jitter/loss; anything
+// longer is assumed to be an intentional pause.
+const talkSpurtGapThreshold = 300 * time.Millisecond
+
+// outboundFrame is one Opus packet queued for pacing (see paceOutboundAudio).
+type outboundFrame struct {
+	seq  int64
+	data []byte
+}
+
+// outboundPaceInterval matches the ~20ms Opus frame duration WebRTC browsers
+// use by default. outboundQueueDepth bounds how much jitter gets absorbed
+// before frames are dropped rather than let latency grow.
+const outboundPaceInterval = 20 * time.Millisecond
+const outboundQueueDepth = 3
+
 func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
+	queue := make(chan outboundFrame, outboundQueueDepth)
+	go p.paceOutboundAudio(queue)
+	defer close(queue)
+
 	var haveSeq bool
 	var lastRTPSeq uint16
+	var lastPacketTime time.Time
 	for {
 		rtp, _, err := track.ReadRTP()
 		if err != nil {
@@ -417,73 +481,100 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 		if p.muted.Load() || p.mumble == nil {
 			continue
 		}
+		now := time.Now()
 
 		// Advance the Mumble sequence number by the real RTP gap so a
 		// browser->bridge packet loss shows up to the receiving Opus
 		// decoders as a gap (letting them apply loss concealment) instead
 		// of being silently smoothed into a continuous stream, which
 		// otherwise produces audible glitches for other Mumble users.
+		//
+		// Exception: a long gap most likely means our own VAD gate paused
+		// transmission between talk spurts, not that packets were lost.
+		// Signaling that as loss would make receivers run concealment to
+		// "fill in" audio that was never supposed to exist, which is
+		// audible as stuttery/robotic artifacts right at the start of every
+		// new utterance — so a long gap resumes fresh instead.
 		delta := int64(1)
 		if haveSeq {
 			gap := rtp.SequenceNumber - lastRTPSeq // uint16 wraparound arithmetic
-			if gap == 0 || gap > 0x8000 {
-				// Duplicate, or old/out-of-order relative to what we already
-				// forwarded; skip it rather than feeding a stateful Opus
-				// decoder audio out of order.
+			switch {
+			case gap == 0:
+				continue // duplicate
+			case now.Sub(lastPacketTime) > talkSpurtGapThreshold:
+				delta = 1 // treat as a new talk spurt, not loss
+			case gap > 0x8000:
+				// Old/out-of-order relative to what we already forwarded;
+				// skip it rather than feeding a stateful Opus decoder audio
+				// out of order.
 				continue
+			default:
+				delta = int64(gap)
 			}
-			delta = int64(gap)
 		}
 		haveSeq = true
 		lastRTPSeq = rtp.SequenceNumber
+		lastPacketTime = now
 
 		seq := p.seqNum.Add(delta) - 1
-		if err := p.mumble.Conn.WriteAudio(4, 0, seq, false, rtp.Payload, nil, nil, nil); err != nil {
-			log.Printf("peer %s: write audio: %v", p.id, err)
-			return
+		// rtp.Payload's backing array may be reused by pion after this loop
+		// iteration; the pacer goroutine sends it later, so it needs its
+		// own copy.
+		frame := outboundFrame{seq: seq, data: append([]byte(nil), rtp.Payload...)}
+		select {
+		case queue <- frame:
+		default:
+			// The pacer has fallen behind — drop the oldest queued frame
+			// rather than let latency grow unbounded.
+			select {
+			case <-queue:
+			default:
+			}
+			select {
+			case queue <- frame:
+			default:
+			}
 		}
 	}
 }
 
-// onMumbleConnect is called once the Mumble handshake completes.
-// p.mumble is not yet assigned at this point (DialWithDialer hasn't returned),
-// so we read the user list directly from the ConnectEvent's client.
-func (p *Peer) onMumbleConnect(e *gumble.ConnectEvent) {
-	names := []string{}
-	if e.Client != nil && e.Client.Self != nil && e.Client.Self.Channel != nil {
-		for _, u := range e.Client.Self.Channel.Users {
-			names = append(names, u.Name)
+// paceOutboundAudio dispatches queued browser audio to Mumble on a steady
+// tick instead of the instant each RTP packet arrives, so that any jitter in
+// the browser's own send timing (encoder/DSP processing variance, scheduler
+// hiccups) gets smoothed out rather than relayed straight through as
+// irregular delivery timing — which otherwise sounds like small, consistent
+// stutters even when no packets are actually being lost.
+func (p *Peer) paceOutboundAudio(queue <-chan outboundFrame) {
+	ticker := time.NewTicker(outboundPaceInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		select {
+		case frame, ok := <-queue:
+			if !ok {
+				return
+			}
+			if p.mumble == nil {
+				continue
+			}
+			if err := p.mumble.WriteAudioPacket(0, frame.seq, false, frame.data); err != nil {
+				log.Printf("peer %s: write audio: %v", p.id, err)
+				return
+			}
+		default:
+			// Browser paused sending (mute, or between talk spurts); nothing
+			// queued this tick.
 		}
 	}
-	p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: names}))
-	if e.WelcomeMessage != nil && *e.WelcomeMessage != "" {
-		p.sendWS(mustMarshal(textMsg{Type: "text", From: "", Message: *e.WelcomeMessage}))
-	}
 }
 
-func (p *Peer) onUserChange(e *gumble.UserChangeEvent) {
-	if e.Type.Has(gumble.UserChangeConnected) {
-		p.sendWS(mustMarshal(userEventMsg{Type: "user_joined", Username: e.User.Name}))
+// onMumbleConnect is called once the Mumble handshake completes. It may run
+// before handleLogin's call to mumble.Dial has returned, so it must use mc
+// rather than p.mumble (see the comment on cfg in handleLogin).
+func (p *Peer) onMumbleConnect(mc *mumble.Client, welcome string) {
+	p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: mc.SelfChannelUsers()}))
+	if welcome != "" {
+		p.sendWS(mustMarshal(textMsg{Type: "text", From: "", Message: welcome}))
 	}
-	if e.Type.Has(gumble.UserChangeDisconnected) {
-		p.sendWS(mustMarshal(userEventMsg{Type: "user_left", Username: e.User.Name}))
-	}
-	if e.Type.Has(gumble.UserChangeChannel) {
-		// Refresh full list when someone moves channels.
-		users := p.channelUsers()
-		p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: users}))
-	}
-}
-
-func (p *Peer) channelUsers() []string {
-	names := []string{}
-	if p.mumble == nil || p.mumble.Self == nil || p.mumble.Self.Channel == nil {
-		return names
-	}
-	for _, u := range p.mumble.Self.Channel.Users {
-		names = append(names, u.Name)
-	}
-	return names
 }
 
 func (p *Peer) sendWS(data []byte) {

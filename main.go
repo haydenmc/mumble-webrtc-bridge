@@ -8,7 +8,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/hayden/mumble-webrtc-bridge/bridge"
-	"layeh.com/gumble/gumble"
 )
 
 //go:embed frontend/dist
@@ -24,15 +23,12 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	// Register Opus codec for gumble globally (once at startup).
-	gumble.RegisterAudioCodec(4, bridge.NewOpusCodec())
-
 	srv := bridge.NewServer(cfg.MumbleAddr(), cfg.MumbleChannel, bridge.ICEConfig{
 		BridgeHost:     cfg.BridgeHost,
 		TURNURLs:       cfg.TURNURLs,
 		TURNUsername:   cfg.TURNUsername,
 		TURNCredential: cfg.TURNCredential,
-	})
+	}, cfg.MumbleForceTCP)
 
 	// Serve compiled frontend.
 	dist, err := fs.Sub(staticFiles, "frontend/dist")

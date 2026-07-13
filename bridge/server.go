@@ -22,17 +22,23 @@ type Server struct {
 	mumbleAddr    string
 	mumbleChannel string
 	ice           ICEConfig
+	// forceTCP disables the UDP voice channel for every connection,
+	// keeping audio on the TCP tunnel. A bisection tool for diagnosing
+	// transport-specific audio issues, and an escape hatch for networks
+	// that block/mangle UDP to the Mumble server.
+	forceTCP bool
 
 	mu    sync.Mutex
 	peers map[string]*Peer
 }
 
-func NewServer(mumbleAddr, mumbleChannel string, ice ICEConfig) *Server {
+func NewServer(mumbleAddr, mumbleChannel string, ice ICEConfig, forceTCP bool) *Server {
 	return &Server{
 		mumbleAddr:    mumbleAddr,
 		mumbleChannel: mumbleChannel,
-		ice:            ice,
-		peers:          make(map[string]*Peer),
+		ice:           ice,
+		forceTCP:      forceTCP,
+		peers:         make(map[string]*Peer),
 	}
 }
 

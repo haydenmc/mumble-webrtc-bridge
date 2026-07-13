@@ -21,6 +21,12 @@ type Config struct {
 	TURNUsername   string
 	TURNCredential string
 
+	// MumbleForceTCP disables the UDP voice channel, keeping audio on the
+	// TCP tunnel. A bisection tool for diagnosing transport-specific audio
+	// issues, and an escape hatch for networks that block/mangle UDP to
+	// the Mumble server.
+	MumbleForceTCP bool
+
 	HTTPAddr string
 	TLSCert  string
 	TLSKey   string
@@ -47,6 +53,7 @@ func loadConfig() (*Config, error) {
 
 	cfg.MumbleChannel = os.Getenv("MUMBLE_CHANNEL")
 	cfg.BridgeHost = os.Getenv("BRIDGE_HOST")
+	cfg.MumbleForceTCP = os.Getenv("MUMBLE_FORCE_TCP") != ""
 
 	if urls := os.Getenv("TURN_URLS"); urls != "" {
 		cfg.TURNURLs = strings.Split(urls, ",")
