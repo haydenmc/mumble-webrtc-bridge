@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"log"
+	"net/http"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -60,6 +61,42 @@ func (s *Server) HandleConn(ws *websocket.Conn) {
 	log.Printf("peer %s connected", p.id)
 	p.run()
 	log.Printf("peer %s disconnected", p.id)
+}
+
+// ServeDebugRecording handles GET /debug/recording?peer=<id>&dir=out|in,
+// dumping that peer's last ~60s of audio in the given direction as a
+// downloadable Ogg Opus file (see Peer.recordOutBuf/recordInBuf /
+// writeDebugRecording). dir=out (the default) is audio the bridge received
+// from that peer's browser; dir=in is audio Mumble relayed back to that
+// peer (e.g. from a second bridge session used as a loopback listener).
+// TEMPORARY diagnostic endpoint for isolating whether garbled audio is
+// already present before it ever leaves the browser, or only appears after
+// a round trip through Mumble. Peer IDs are logged on connect (and in the
+// "DIAG pkt" audio trace) — copy one from there.
+func (s *Server) ServeDebugRecording(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("peer")
+	dir := r.URL.Query().Get("dir")
+	if dir == "" {
+		dir = "out"
+	}
+	if dir != "out" && dir != "in" {
+		http.Error(w, `dir must be "out" or "in"`, http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	p := s.peers[id]
+	s.mu.Unlock()
+	if p == nil {
+		http.Error(w, "unknown peer id (check the server logs for a live one)", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "audio/ogg")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+id+`-`+dir+`.opus"`)
+	if err := p.writeDebugRecording(w, dir); err != nil {
+		log.Printf("peer %s: debug recording: %v", id, err)
+	}
 }
 
 func (s *Server) register(p *Peer) {

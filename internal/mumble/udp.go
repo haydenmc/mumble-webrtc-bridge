@@ -1,7 +1,6 @@
 package mumble
 
 import (
-	"encoding/binary"
 	"log"
 	"net"
 	"time"
@@ -9,6 +8,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/MumbleProto"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/cryptstate"
+	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/varint"
 )
 
 const (
@@ -19,12 +19,23 @@ const (
 	// flow, etc.) self-heals rather than blackholing audio.
 	udpStaleTimeout = 15 * time.Second
 
-	// On first establishing crypt keys we send a short burst of pings to
-	// punch through NAT and get an initial liveness confirmation quickly,
-	// then settle into a steady keepalive/liveness cadence.
-	udpRapidPings         = 5
-	udpRapidPingInterval  = 250 * time.Millisecond
-	udpSteadyPingInterval = 5 * time.Second
+	// udpPingInterval matches the real Mumble client's default
+	// iPingIntervalMsec exactly (Settings.h, 5000ms) — a flat cadence from
+	// the moment UDP is up, no extra burst at the start. An earlier version
+	// of this client added a rapid burst of pings (5 at 250ms) on first
+	// connecting to punch through NAT faster; the real client has no such
+	// behavior, and it was visibly showing up as far more ping traffic than
+	// a real client produces once the Ping message actually reported real
+	// stats (see sendPing).
+	udpPingInterval = 5 * time.Second
+
+	// udpSendQueueDepth bounds how many plaintext frames can be queued for
+	// udpSendLoop before a producer (readBrowserAudio or the ping loop)
+	// gives up on this send rather than wait. Generous since encrypt+write
+	// is fast (microseconds) and this is the only goroutine draining it —
+	// this is purely a buffer against transient scheduling delays, not a
+	// normal operating depth.
+	udpSendQueueDepth = 32
 )
 
 // handleCryptSetup applies the server's CryptSetup message. Semantics
@@ -68,6 +79,7 @@ func (c *Client) handleCryptSetup(data []byte) error {
 	case len(p.ServerNonce) > 0:
 		c.decryptMu.Lock()
 		err := c.crypt.SetDecryptIV(p.ServerNonce)
+		c.crypt.Resync++
 		c.decryptMu.Unlock()
 		return err
 
@@ -93,13 +105,15 @@ func (c *Client) startUDP() {
 	}
 	log.Printf("mumble: UDP voice channel dialed (%s); confirming liveness before using it for audio", c.udpAddr)
 	c.udpConn.Store(udpConn)
+	c.udpSendCh = make(chan []byte, udpSendQueueDepth)
 
 	go func() {
 		<-c.end
 		udpConn.Close()
 	}()
 	go c.udpReadLoop(udpConn)
-	go c.udpPingLoop(udpConn)
+	go c.udpSendLoop(udpConn)
+	go c.udpPingLoop()
 }
 
 func (c *Client) teardownUDP() {
@@ -132,91 +146,125 @@ func (c *Client) udpReadLoop(udpConn *net.UDPConn) {
 			log.Printf("mumble: UDP voice channel confirmed working; audio will prefer it over the TCP tunnel")
 		}
 		c.udpLastRecv.Store(time.Now().UnixNano())
+		c.udpPacketsRecv.Add(1)
 
 		pkt := plain[:plainLen]
-		if (pkt[0]>>5)&0x7 == audioTypeOpus {
+		switch (pkt[0] >> 5) & 0x7 {
+		case audioTypeOpus:
 			_ = c.handleAudioPacket(pkt)
+		case audioTypePing:
+			// The server echoes back our own ping payload verbatim, so the
+			// decoded value is our own send timestamp — RTT is just now
+			// minus that.
+			if ts, n := varint.Decode(pkt[1:]); n > 0 {
+				if rttNanos := time.Now().UnixNano() - ts; rttNanos >= 0 {
+					c.udpPingStats.add(float32(rttNanos) / 1e6)
+				}
+			}
 		}
-		// Any other successfully-decrypted packet (e.g. a Ping reply) only
-		// needed to serve as the liveness signal recorded above.
 	}
 }
 
-func (c *Client) udpPingLoop(udpConn *net.UDPConn) {
-	send := func() {
-		_ = c.encryptAndSendUDP(udpConn, buildPingFrame())
-	}
+func (c *Client) udpPingLoop() {
+	// One immediate ping so UDP liveness (and the TCP-tunnel-vs-UDP choice
+	// in tryWriteUDP) is confirmed right away rather than waiting a full
+	// interval for the first tick; every ping after that follows the real
+	// client's flat cadence, no burst.
+	c.enqueueUDPSend(buildPingFrame(uint64(time.Now().UnixNano())))
 
-	for i := 0; i < udpRapidPings; i++ {
-		send()
-		select {
-		case <-c.end:
-			return
-		case <-time.After(udpRapidPingInterval):
-		}
-	}
-
-	ticker := time.NewTicker(udpSteadyPingInterval)
+	ticker := time.NewTicker(udpPingInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-c.end:
 			return
 		case <-ticker.C:
-			send()
+			c.enqueueUDPSend(buildPingFrame(uint64(time.Now().UnixNano())))
 		}
 	}
 }
 
-func buildPingFrame() []byte {
-	frame := make([]byte, 1+8)
-	frame[0] = audioTypePing << 5
-	binary.BigEndian.PutUint64(frame[1:], uint64(time.Now().UnixNano()))
-	return frame
+// buildPingFrame builds a legacy voice-channel ping packet: header byte
+// (type=Ping, target=0) followed by a single varint-encoded timestamp — the
+// server treats this as opaque and just echoes it back verbatim, so any
+// monotonically-useful value works as long as it fits a 64-bit varint (see
+// docs/dev/network-protocol/voice_data.md in the Mumble repo). Previously
+// this encoded the timestamp as a fixed 8-byte big-endian integer instead of
+// a varint, which happened to still produce a packet the server accepted
+// and replied to (so UDP liveness detection never noticed), but wasn't
+// actually protocol-correct.
+func buildPingFrame(timestamp uint64) []byte {
+	var buf [1 + varint.MaxVarintLen]byte
+	buf[0] = audioTypePing << 5
+	n := 1 + varint.Encode(buf[1:], int64(timestamp))
+	return append([]byte(nil), buf[:n]...)
 }
 
-// tryWriteUDP attempts to send an already-built audio frame over the UDP
-// voice channel. It returns false (letting the caller fall back to the TCP
-// tunnel) whenever UDP isn't ready, hasn't been confirmed working recently,
-// or the send itself fails.
+// tryWriteUDP attempts to queue an already-built audio frame for the UDP
+// voice channel's sender goroutine (see udpSendLoop). It returns false
+// (letting the caller fall back to the TCP tunnel) whenever UDP isn't
+// ready, hasn't been confirmed working recently, or udpSendLoop is
+// (abnormally) backed up enough to fill udpSendQueueDepth.
 func (c *Client) tryWriteUDP(frame []byte) bool {
 	if !c.cryptReady.Load() {
 		return false
 	}
-	udpConn := c.udpConn.Load()
-	if udpConn == nil {
+	if c.udpConn.Load() == nil {
 		return false
 	}
 	last := c.udpLastRecv.Load()
 	if last == 0 || time.Since(time.Unix(0, last)) > udpStaleTimeout {
 		return false
 	}
-
-	return c.encryptAndSendUDP(udpConn, frame) == nil
+	return c.enqueueUDPSend(frame)
 }
 
-// encryptAndSendUDP encrypts plain into c.udpSendBuf (grown and reused
-// across calls rather than allocated fresh each time — this runs once per
-// outbound audio packet, tens of times a second) and writes it to udpConn.
-//
-// Encrypt and write happen atomically under encryptMu: Mumble's crypt IV is
-// a strict per-connection counter, so if this and udpPingLoop's send() both
-// encrypted (bumping the IV) before either wrote to the socket, whichever
-// write lost the race would arrive with an IV out of sequence. The server's
-// decrypt state machine tolerates loss but not reordering, and feeding Opus
-// frames to the decoder out of order produces severe distortion. Holding
-// the lock across the write serializes encrypt+send as one atomic unit
-// against the other UDP sender — but never against udpReadLoop's Decrypt,
-// which uses the separate decryptMu.
-func (c *Client) encryptAndSendUDP(udpConn *net.UDPConn, plain []byte) error {
-	c.encryptMu.Lock()
-	need := len(plain) + c.crypt.Overhead()
-	if cap(c.udpSendBuf) < need {
-		c.udpSendBuf = make([]byte, need)
+// enqueueUDPSend hands a plaintext frame to udpSendLoop. Returns false if
+// the queue is full rather than blocking the caller (readBrowserAudio or
+// udpPingLoop) — under normal conditions udpSendLoop drains in
+// microseconds, so hitting this means something is genuinely wrong with
+// the UDP path, not routine contention.
+func (c *Client) enqueueUDPSend(frame []byte) bool {
+	select {
+	case c.udpSendCh <- frame:
+		return true
+	default:
+		return false
 	}
-	ct := c.udpSendBuf[:need]
-	c.crypt.Encrypt(ct, plain)
-	_, err := udpConn.Write(ct)
-	c.encryptMu.Unlock()
-	return err
+}
+
+// udpSendLoop is the sole goroutine that ever calls crypt.Encrypt or writes
+// to the UDP socket, for both audio (via tryWriteUDP) and keepalive pings
+// (via udpPingLoop) — they only ever enqueue a plaintext frame here rather
+// than encrypting and writing directly. This means producing a frame to
+// send is always a fast, lock-free channel operation that can never block
+// on the other sender's encrypt+write, the same property Mumble's own C++
+// client gets for its UDP receive path for free from Qt's thread-affinity
+// model (see ServerHandler::udpReady, which needs no lock because it's
+// only ever invoked on ServerHandler's own thread) — Go has no equivalent
+// automatic single-thread confinement, so this goroutine exists to
+// establish it explicitly for the send side.
+//
+// Mumble's crypt IV is a strict per-connection counter, so encrypt and
+// write still need to happen as one atomic step relative to encryptMu's
+// other (rare) users — handleCryptSetup's SetKey/resync-reply cases, which
+// run on the main read-loop goroutine — even though there's no longer
+// another sender goroutine to worry about.
+func (c *Client) udpSendLoop(udpConn *net.UDPConn) {
+	for {
+		select {
+		case <-c.end:
+			return
+		case plain := <-c.udpSendCh:
+			c.encryptMu.Lock()
+			need := len(plain) + c.crypt.Overhead()
+			if cap(c.udpSendBuf) < need {
+				c.udpSendBuf = make([]byte, need)
+			}
+			ct := c.udpSendBuf[:need]
+			c.crypt.Encrypt(ct, plain)
+			_, _ = udpConn.Write(ct)
+			c.encryptMu.Unlock()
+		}
+	}
 }

@@ -3,6 +3,37 @@
 // and dynamically relays whichever sessions are talking onto them.
 const REMOTE_SLOTS = 5
 
+// forceOpusCBR appends constant-bitrate parameters to the opus fmtp line(s)
+// in an SDP offer before it's sent. Diagnostic/mitigation for a suspected
+// cause of intermittent garbled audio: WebRTC's opus encoder adaptively
+// switches CELT bandwidth (SWB <-> FB) mid-stream, and each switch resets
+// CELT's internal MDCT/overlap-add state, which can produce an audible
+// glitch right at the switch. cbr=1 alone only pins bitrate, not bandwidth
+// mode — libopus's automatic bandwidth selection is bitrate-dependent, and
+// 64kbps sits close enough to the SWB/FB decision boundary that per-frame
+// complexity variation can still tip it either way. Pushing the bitrate
+// well clear of that boundary should stabilize the bandwidth choice.
+// Applies to every m= section's opus fmtp line rather than just the mic's;
+// the extra ones are on recvonly transceivers that never send anything, so
+// it's a no-op there, not worth the complexity of targeting only the mic's
+// line.
+function forceOpusCBR(sdp: string): string {
+  const pts = new Set<string>()
+  for (const m of sdp.matchAll(/^a=rtpmap:(\d+) opus\/48000/gim)) {
+    pts.add(m[1])
+  }
+  if (pts.size === 0) return sdp
+  const fmtpLine = new RegExp(`^(a=fmtp:(?:${[...pts].join('|')}) )(.*)$`, 'gim')
+  return sdp.replace(fmtpLine, (_match, prefix: string, params: string) => {
+    const kept = params
+      .split(';')
+      .map((p) => p.trim())
+      .filter((p) => p !== '' && !p.startsWith('cbr=') && !p.startsWith('maxaveragebitrate='))
+    kept.push('cbr=1', 'maxaveragebitrate=128000')
+    return prefix + kept.join(';')
+  })
+}
+
 export type ServerMsg =
   | { type: 'connected' }
   | { type: 'error'; message: string }
@@ -35,6 +66,9 @@ export class MumbleWebRTCClient {
   private remoteAudioEls = new Map<string, HTMLAudioElement>()
   private manuallyMuted = false
   private micTrack: MediaStreamTrack | null = null
+  // TEMPORARY diagnostic fields — see downloadDebugRecording().
+  private debugRecorder: MediaRecorder | null = null
+  private debugChunks: Blob[] = []
 
   constructor(
     private events: ClientEvents,
@@ -166,11 +200,67 @@ export class MumbleWebRTCClient {
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      // sampleRate/channelCount: DIAGNOSTIC — explicitly requesting Opus's
+      // native 48kHz mono to rule out WebRTC's real-time pipeline having
+      // to resample from the mic's native rate (a likely source of
+      // occasional glitches that wouldn't show up as anything unusual at
+      // the RTP level, since the resampled PCM would just be garbled
+      // before encoding into an otherwise-normal-looking Opus packet).
+      // These are only *requested*; the browser can still pick something
+      // else if the device doesn't support it — see the logged
+      // getSettings() output below to confirm what was actually granted.
+      // DIAGNOSTIC: DSP temporarily off again, now in combination with the
+      // confirmed-correct 48kHz above, to rule out any interaction between
+      // the two rather than assuming the earlier (pre-sample-rate-fix) DSP
+      // test still applies. Revert to true/true/true once ruled out.
+      audio: {
+        noiseSuppression: false,
+        echoCancellation: false,
+        autoGainControl: false,
+        sampleRate: 48000,
+        channelCount: 1,
+      },
       video: false,
     })
     const [micTrack] = stream.getAudioTracks()
     this.micTrack = micTrack
+    console.log('mic track settings:', micTrack.getSettings())
+    if (micTrack.getCapabilities) {
+      console.log('mic track capabilities:', micTrack.getCapabilities())
+    }
+    // getSettings()/getCapabilities() don't reliably report sampleRate
+    // across browsers (Firefox omits it entirely) — an AudioContext
+    // attached to the same track is a more consistent way to see the
+    // actual operating sample rate of the audio graph the browser built
+    // for this device.
+    try {
+      const probeCtx = new AudioContext()
+      probeCtx.createMediaStreamSource(stream)
+      console.log('AudioContext sampleRate for this stream:', probeCtx.sampleRate)
+      void probeCtx.close()
+    } catch (err) {
+      console.warn('AudioContext sample rate probe failed:', err)
+    }
+
+    // TEMPORARY diagnostic: record the raw mic stream locally, completely
+    // independent of WebRTC transmission, so it can be compared against
+    // what's heard over the bridge — if this recording is also garbled,
+    // the problem is in capture itself (mic/OS/driver as the browser sees
+    // it), before WebRTC's own Opus encoder or any network path is
+    // involved; if it's clean, the problem is specifically in WebRTC's
+    // internal audio pipeline. See downloadDebugRecording().
+    if (typeof MediaRecorder !== 'undefined') {
+      try {
+        this.debugRecorder = new MediaRecorder(stream)
+        this.debugRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) this.debugChunks.push(e.data)
+        }
+        this.debugRecorder.start(1000)
+      } catch (err) {
+        console.warn('debug MediaRecorder unavailable:', err)
+      }
+    }
+
     // addTransceiver (not addTrack) so the mic always gets its own new m=
     // section. addTrack's spec behavior is to *reuse* an existing
     // compatible unassociated transceiver if one is available — it would
@@ -181,8 +271,9 @@ export class MumbleWebRTCClient {
     this.updateTransmission()
 
     const offer = await this.pc.createOffer()
-    await this.pc.setLocalDescription(offer)
-    this.send({ type: 'sdp', sdpType: 'offer', sdp: offer.sdp ?? '' })
+    const sdp = forceOpusCBR(offer.sdp ?? '')
+    await this.pc.setLocalDescription({ type: offer.type, sdp })
+    this.send({ type: 'sdp', sdpType: 'offer', sdp })
   }
 
   setMuted(muted: boolean): void {
@@ -222,6 +313,26 @@ export class MumbleWebRTCClient {
     this.send({ type: 'text', message })
   }
 
+  // TEMPORARY diagnostic: saves everything recorded so far (webm/opus,
+  // playable in the browser or VLC) as a download, without interrupting
+  // the ongoing recording. Call from the browser console:
+  //   client.downloadDebugRecording()
+  // (main.ts doesn't expose a button for this — it's a one-off debugging
+  // aid, not a feature.)
+  downloadDebugRecording(): void {
+    if (this.debugChunks.length === 0) {
+      console.warn('no debug recording data yet')
+      return
+    }
+    const blob = new Blob(this.debugChunks, { type: 'audio/webm' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `mic-debug-${new Date().toISOString().replace(/[:.]/g, '-')}.webm`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 10000)
+  }
+
   disconnect(): void {
     this.cleanup()
     this.events.onDisconnected()
@@ -229,6 +340,10 @@ export class MumbleWebRTCClient {
 
   private cleanup(): void {
     this.manuallyMuted = false
+    if (this.debugRecorder?.state !== 'inactive') {
+      this.debugRecorder?.stop()
+    }
+    this.debugRecorder = null
     this.micTrack?.stop()
     this.micTrack = null
     this.pc?.close()

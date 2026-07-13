@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"sync"
@@ -53,6 +54,22 @@ type Peer struct {
 
 	muted  atomic.Bool
 	seqNum atomic.Int64
+
+	// recordOutBuf/recordInBuf are ring buffers of the most recent Opus
+	// packets crossing this peer in each direction, exposed via
+	// /debug/recording so they can be dumped to a real playable file:
+	// recordOut is what the bridge received from the browser (before
+	// anything downstream — our own send encoding, Mumble's relay — touches
+	// it); recordIn is whatever Mumble relays back to this peer (from
+	// other sessions, including e.g. a second bridge session used as a
+	// loopback listener while a first session talks). Comparing the two
+	// isolates whether garbled audio is already present in what the browser
+	// sends, or only appears after a round trip through Mumble. TEMPORARY
+	// diagnostic.
+	recordOutMu  sync.Mutex
+	recordOutBuf []recordedOpusPacket
+	recordInMu   sync.Mutex
+	recordInBuf  []recordedOpusPacket
 
 	// slotsReady guards against Mumble audio arriving (on the mumble.Client's
 	// internal goroutine, which can run concurrently with handleLogin/
@@ -369,6 +386,8 @@ func (p *Peer) handleMute(muted bool) {
 // handleMumbleAudio relays one Mumble user's raw Opus packet to whichever
 // pooled WebRTC track their session is (or becomes) assigned to.
 func (p *Peer) handleMumbleAudio(session uint32, opus []byte) {
+	p.recordOpus(&p.recordInMu, &p.recordInBuf, opus)
+
 	if !p.slotsReady.Load() {
 		// setupWebRTC (called after mumble.Dial returns) hasn't populated
 		// the track pool yet; drop this packet rather than race it.
@@ -448,40 +467,14 @@ func (p *Peer) reapSlots() {
 	}
 }
 
-// readBrowserAudio reads Opus RTP from the browser and sends it directly to Mumble.
-// talkSpurtGapThreshold bounds how long a gap between browser RTP packets
-// can be before it's treated as a fresh talk spurt (the client's VAD pausing
-// transmission via replaceTrack(null) between utterances) rather than real
-// network loss within a continuous stream. VAD only cuts transmission after
-// its redemption window (600ms of silence, see frontend/src/client.ts), so
-// any gap shorter than that is assumed to be ordinary jitter/loss; anything
-// longer is assumed to be an intentional pause.
-const talkSpurtGapThreshold = 300 * time.Millisecond
-
-// outboundFrame is one Opus packet queued for pacing (see paceOutboundAudio).
-type outboundFrame struct {
-	seq  int64
-	data []byte
-}
-
-// outboundPaceInterval matches the ~20ms Opus frame duration WebRTC browsers
-// use by default. outboundQueueDepth bounds how much jitter gets absorbed
-// (10 packets = ~200ms) before frames are dropped rather than let latency
-// grow further; the pacer catches up immediately rather than draining at a
-// strict one-per-tick rate (see paceOutboundAudio), so this mostly just
-// needs to be generous enough to survive brief scheduling hiccups without
-// hitting the drop path.
-const outboundPaceInterval = 20 * time.Millisecond
-const outboundQueueDepth = 10
-
+// readBrowserAudio reads Opus RTP from the browser and sends it directly to
+// Mumble, one packet in, one packet out, in the order pion delivers them.
+// No dedup, no reorder handling, no gap-driven Mumble sequence-number
+// reconstruction — those were all tried, one at a time and in combination,
+// while chasing an intermittent stutter, and none of it fixed the stutter.
+// Deliberately going back to the simplest possible version so any further
+// investigation starts from a known-plain baseline.
 func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
-	queue := make(chan outboundFrame, outboundQueueDepth)
-	go p.paceOutboundAudio(queue)
-	defer close(queue)
-
-	var haveSeq bool
-	var lastRTPSeq uint16
-	var lastPacketTime time.Time
 	for {
 		rtp, _, err := track.ReadRTP()
 		if err != nil {
@@ -490,94 +483,25 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 		if p.muted.Load() || p.mumble == nil {
 			continue
 		}
-		now := time.Now()
+		p.recordOpus(&p.recordOutMu, &p.recordOutBuf, rtp.Payload)
 
-		// Advance the Mumble sequence number by the real RTP gap so a
-		// browser->bridge packet loss shows up to the receiving Opus
-		// decoders as a gap (letting them apply loss concealment) instead
-		// of being silently smoothed into a continuous stream, which
-		// otherwise produces audible glitches for other Mumble users.
-		//
-		// Exception: a long gap most likely means our own VAD gate paused
-		// transmission between talk spurts, not that packets were lost.
-		// Signaling that as loss would make receivers run concealment to
-		// "fill in" audio that was never supposed to exist, which is
-		// audible as stuttery/robotic artifacts right at the start of every
-		// new utterance — so a long gap resumes fresh instead.
-		delta := int64(1)
-		if haveSeq {
-			gap := rtp.SequenceNumber - lastRTPSeq // uint16 wraparound arithmetic
-			switch {
-			case gap == 0:
-				continue // duplicate
-			case now.Sub(lastPacketTime) > talkSpurtGapThreshold:
-				delta = 1 // treat as a new talk spurt, not loss
-			case gap > 0x8000:
-				// Old/out-of-order relative to what we already forwarded;
-				// skip it rather than feeding a stateful Opus decoder audio
-				// out of order.
-				continue
-			default:
-				delta = int64(gap)
-			}
+		// Mumble voice-packet sequence numbers count 10ms frames, not
+		// packets: the receiving client schedules playback at
+		// timestamp = frameNumber * 10ms (AudioOutputSpeech.cpp:
+		// jbp.timestamp = iFrameSize * frameNumber, iFrameSize being 10ms
+		// of samples), so a 20ms packet must advance the counter by 2.
+		// Advancing by 1 per 20ms packet — as every earlier version of
+		// this relay did — makes each listener's jitter-buffer timeline
+		// run at half real time, so it chronically underruns and resyncs:
+		// heard as a burst of stutters every few seconds, even in silence,
+		// identically for every listener. Padding-only packets carry no
+		// audio time and advance the counter by 0.
+		units := int64(opusFrameDuration(rtp.Payload) / (10 * time.Millisecond))
+		if len(rtp.Payload) == 0 {
+			units = 0
 		}
-		haveSeq = true
-		lastRTPSeq = rtp.SequenceNumber
-		lastPacketTime = now
-
-		seq := p.seqNum.Add(delta) - 1
-		// rtp.Payload's backing array may be reused by pion after this loop
-		// iteration; the pacer goroutine sends it later, so it needs its
-		// own copy.
-		frame := outboundFrame{seq: seq, data: append([]byte(nil), rtp.Payload...)}
-		select {
-		case queue <- frame:
-		default:
-			// The pacer has fallen behind — drop the oldest queued frame
-			// rather than let latency grow unbounded.
-			select {
-			case <-queue:
-			default:
-			}
-			select {
-			case queue <- frame:
-			default:
-			}
-		}
-	}
-}
-
-// paceOutboundAudio dispatches queued browser audio to Mumble on a steady
-// clock instead of the instant each RTP packet arrives, so that any jitter
-// in the browser's own send timing (encoder/DSP processing variance,
-// scheduler hiccups) gets smoothed out rather than relayed straight through
-// as irregular delivery timing — which otherwise sounds like small,
-// consistent stutters even when no packets are actually being lost.
-//
-// Unlike a fixed ticker that drains at most one frame per tick, this tracks
-// a virtual "next send time" that advances by exactly one frame interval
-// per packet sent: when running on schedule it sleeps to hold the pace: but
-// when it's fallen behind (a slow WriteAudioPacket call, GC, scheduler
-// preemption, whatever), it sends immediately instead of waiting for the
-// next tick boundary and resumes pacing from there. That catches up in one
-// step instead of bleeding the backlog out one frame per tick, so a brief
-// stall doesn't cost extra frames off the front of outboundQueueDepth's
-// buffer on top of whatever the stall itself delayed.
-func (p *Peer) paceOutboundAudio(queue <-chan outboundFrame) {
-	var nextSend time.Time
-	for frame := range queue {
-		now := time.Now()
-		if nextSend.Before(now) {
-			nextSend = now
-		} else {
-			time.Sleep(nextSend.Sub(now))
-		}
-		nextSend = nextSend.Add(outboundPaceInterval)
-
-		if p.mumble == nil {
-			continue
-		}
-		if err := p.mumble.WriteAudioPacket(0, frame.seq, false, frame.data); err != nil {
+		seq := p.seqNum.Add(units) - units
+		if err := p.mumble.WriteAudioPacket(0, seq, false, rtp.Payload); err != nil {
 			log.Printf("peer %s: write audio: %v", p.id, err)
 			return
 		}
@@ -611,4 +535,63 @@ func (p *Peer) close() {
 		}
 		_ = p.ws.Close()
 	})
+}
+
+// recordBufCapacity bounds recordBuf to roughly the last minute of audio at
+// a nominal 50 packets/sec (20ms frames).
+const recordBufCapacity = 3000
+
+type recordedOpusPacket struct {
+	data    []byte
+	samples int64
+}
+
+// recordOpusPacket appends payload to the ring buffer backing
+// /debug/recording, evicting the oldest packet once full. TEMPORARY
+// diagnostic — see the recordBuf field comment.
+// recordOpus appends payload to the given ring buffer (recordOutBuf or
+// recordInBuf), evicting the oldest packet once full. TEMPORARY diagnostic
+// — see the recordOutBuf/recordInBuf field comment.
+func (p *Peer) recordOpus(mu *sync.Mutex, buf *[]recordedOpusPacket, payload []byte) {
+	samples := int64(opusFrameDuration(payload) * 48000 / time.Second)
+	// payload's backing array may be reused by the caller; copy before
+	// retaining (true for both the pion RTP path and Mumble's own decode
+	// buffer reuse).
+	cp := append([]byte(nil), payload...)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*buf) >= recordBufCapacity {
+		*buf = (*buf)[1:]
+	}
+	*buf = append(*buf, recordedOpusPacket{data: cp, samples: samples})
+}
+
+// writeDebugRecording dumps the current contents of recordOutBuf (out) or
+// recordInBuf (in) as an Ogg Opus file. TEMPORARY diagnostic — see the
+// recordOutBuf/recordInBuf field comment.
+func (p *Peer) writeDebugRecording(w io.Writer, direction string) error {
+	mu, buf := &p.recordOutMu, &p.recordOutBuf
+	if direction == "in" {
+		mu, buf = &p.recordInMu, &p.recordInBuf
+	}
+
+	mu.Lock()
+	packets := append([]recordedOpusPacket(nil), *buf...)
+	mu.Unlock()
+
+	// Channel count matches what was observed in the TOC's stereo bit
+	// during diagnosis (WebRTC's opus encoder commonly sets this
+	// regardless of actual source channel count); using anything else
+	// would make some players refuse to play the file.
+	ow, err := newOggOpusWriter(w, uint32(time.Now().UnixNano()), 2, 48000)
+	if err != nil {
+		return err
+	}
+	for _, pkt := range packets {
+		if err := ow.WritePacket(pkt.data, pkt.samples); err != nil {
+			return err
+		}
+	}
+	return ow.Close()
 }

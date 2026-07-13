@@ -56,19 +56,41 @@ type Client struct {
 	// is safe for concurrent use, so the two directions have no shared
 	// mutable state once the initial key exchange (which does touch both,
 	// see handleCryptSetup) has completed.
+	//
+	// Encrypt itself is only ever called from udpSendLoop (the sole
+	// consumer of udpSendCh) — audio (readBrowserAudio) and pings
+	// (udpPingLoop) both just enqueue plaintext frames there rather than
+	// calling encrypt+write directly, so producing a frame is a fast,
+	// lock-free channel send and neither sender can ever be blocked
+	// waiting on the other's encrypt+write. encryptMu still exists because
+	// handleCryptSetup's rare SetKey/resync-reply cases touch EncryptIV
+	// from the main read-loop goroutine, concurrently with udpSendLoop.
 	crypt       cryptstate.CryptState
 	encryptMu   sync.Mutex
 	decryptMu   sync.Mutex
 	cryptReady  atomic.Bool
 	udpAddr     *net.UDPAddr
 	udpConn     atomic.Pointer[net.UDPConn]
+	udpSendCh   chan []byte
 	udpOnce     sync.Once
 	udpLastRecv atomic.Int64 // unix nano of last successfully-decrypted UDP packet
 	// udpSendBuf is scratch space for UDP ciphertext, reused across sends
 	// (audio and ping) rather than allocated fresh per packet. Safe because
-	// every write to it happens while holding encryptMu, which both
-	// senders already need for crypt.Encrypt itself.
+	// it's only ever touched from udpSendLoop, the sole sender goroutine.
 	udpSendBuf []byte
+
+	// ping: connection-quality stats reported in our own outgoing Ping
+	// messages, purely so a real Mumble client querying our user's
+	// Statistics has something other than zeroes to show. tcpPingStats is
+	// fed from handlePing (the server echoes back our Timestamp; RTT is
+	// now-echoed); udpPingStats is fed from udpReadLoop the same way over
+	// the voice channel. Good/Late/Lost/Resync are read directly off crypt
+	// (already tracked there for OCB2 replay protection) rather than
+	// duplicated here.
+	tcpPacketsRecv atomic.Uint32
+	udpPacketsRecv atomic.Uint32
+	tcpPingStats   pingStats
+	udpPingStats   pingStats
 
 	handshakeDone chan error
 	end           chan struct{}
@@ -94,6 +116,10 @@ func Dial(addr string, tlsConfig *tls.Config, cfg *Config) (*Client, error) {
 		return nil, fmt.Errorf("mumble: unexpected remote address type %T", tcpConn.RemoteAddr())
 	}
 	udpAddr := &net.UDPAddr{IP: tcpRemote.IP, Port: tcpRemote.Port, Zone: tcpRemote.Zone}
+
+	if cfg.DisableUDP {
+		log.Printf("mumble: UDP voice channel disabled by config; all audio will use the TCP tunnel")
+	}
 
 	root := newChannel(0)
 	c := &Client{
@@ -160,10 +186,76 @@ func (c *Client) pingLoop() {
 		case <-c.end:
 			return
 		case <-ticker.C:
-			ts := uint64(time.Now().UnixNano())
-			_ = c.conn.writeProto(&MumbleProto.Ping{Timestamp: &ts})
+			c.sendPing()
 		}
 	}
+}
+
+// sendPing builds and sends a fully populated Ping message: our own
+// timestamp (which the server echoes back verbatim, letting handlePing
+// derive a TCP RTT sample from it — see docs/dev/network-protocol in the
+// Mumble repo, "Server should not attempt to decode" this field) plus the
+// same connection-quality stats a real client reports, so anyone viewing
+// this bridge's connection in their Statistics dialog sees real numbers
+// instead of nothing.
+func (c *Client) sendPing() {
+	ts := uint64(time.Now().UnixNano())
+
+	c.decryptMu.Lock()
+	good, late, lost, resync := c.crypt.Good, c.crypt.Late, c.crypt.Lost, c.crypt.Resync
+	c.decryptMu.Unlock()
+
+	udpPackets := c.udpPacketsRecv.Load()
+	tcpPackets := c.tcpPacketsRecv.Load()
+	udpAvg, udpVar := c.udpPingStats.avgVar()
+	tcpAvg, tcpVar := c.tcpPingStats.avgVar()
+
+	_ = c.conn.writeProto(&MumbleProto.Ping{
+		Timestamp:  &ts,
+		Good:       &good,
+		Late:       &late,
+		Lost:       &lost,
+		Resync:     &resync,
+		UdpPackets: &udpPackets,
+		TcpPackets: &tcpPackets,
+		UdpPingAvg: &udpAvg,
+		UdpPingVar: &udpVar,
+		TcpPingAvg: &tcpAvg,
+		TcpPingVar: &tcpVar,
+	})
+}
+
+// handlePing processes a Ping message received from the server: its reply
+// to our own most recent Ping (Timestamp is our value, echoed back — RTT is
+// simply now minus that), and its good/late/lost/resync counts describing
+// how well it's been receiving our UDP audio (stored on crypt purely for
+// parity with a real client's m_statsRemote; nothing here currently reads
+// them back out).
+func (c *Client) handlePing(data []byte) error {
+	var p MumbleProto.Ping
+	if err := proto.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	if p.Timestamp != nil {
+		if rttNanos := time.Now().UnixNano() - int64(*p.Timestamp); rttNanos >= 0 {
+			c.tcpPingStats.add(float32(rttNanos) / 1e6)
+		}
+	}
+	c.decryptMu.Lock()
+	if p.Good != nil {
+		c.crypt.RemoteGood = *p.Good
+	}
+	if p.Late != nil {
+		c.crypt.RemoteLate = *p.Late
+	}
+	if p.Lost != nil {
+		c.crypt.RemoteLost = *p.Lost
+	}
+	if p.Resync != nil {
+		c.crypt.RemoteResync = *p.Resync
+	}
+	c.decryptMu.Unlock()
+	return nil
 }
 
 func (c *Client) readLoop() {
@@ -174,6 +266,7 @@ func (c *Client) readLoop() {
 			disconnectErr = err
 			break
 		}
+		c.tcpPacketsRecv.Add(1)
 		c.dispatch(pType, data)
 	}
 
@@ -195,6 +288,8 @@ func (c *Client) dispatch(pType uint16, data []byte) {
 	switch pType {
 	case ptUDPTunnel:
 		err = c.handleAudioPacket(data)
+	case ptPing:
+		err = c.handlePing(data)
 	case ptReject:
 		err = c.handleReject(data)
 	case ptServerSync:
@@ -212,7 +307,7 @@ func (c *Client) dispatch(pType uint16, data []byte) {
 	case ptCryptSetup:
 		err = c.handleCryptSetup(data)
 	default:
-		// Version, Ping, and everything else this client doesn't act on.
+		// Version and everything else this client doesn't act on.
 	}
 	if err != nil {
 		// A single malformed/unexpected message shouldn't take down the
