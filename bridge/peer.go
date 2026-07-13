@@ -466,9 +466,13 @@ type outboundFrame struct {
 
 // outboundPaceInterval matches the ~20ms Opus frame duration WebRTC browsers
 // use by default. outboundQueueDepth bounds how much jitter gets absorbed
-// before frames are dropped rather than let latency grow.
+// (10 packets = ~200ms) before frames are dropped rather than let latency
+// grow further; the pacer catches up immediately rather than draining at a
+// strict one-per-tick rate (see paceOutboundAudio), so this mostly just
+// needs to be generous enough to survive brief scheduling hiccups without
+// hitting the drop path.
 const outboundPaceInterval = 20 * time.Millisecond
-const outboundQueueDepth = 3
+const outboundQueueDepth = 10
 
 func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 	queue := make(chan outboundFrame, outboundQueueDepth)
@@ -544,30 +548,38 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 }
 
 // paceOutboundAudio dispatches queued browser audio to Mumble on a steady
-// tick instead of the instant each RTP packet arrives, so that any jitter in
-// the browser's own send timing (encoder/DSP processing variance, scheduler
-// hiccups) gets smoothed out rather than relayed straight through as
-// irregular delivery timing — which otherwise sounds like small, consistent
-// stutters even when no packets are actually being lost.
+// clock instead of the instant each RTP packet arrives, so that any jitter
+// in the browser's own send timing (encoder/DSP processing variance,
+// scheduler hiccups) gets smoothed out rather than relayed straight through
+// as irregular delivery timing — which otherwise sounds like small,
+// consistent stutters even when no packets are actually being lost.
+//
+// Unlike a fixed ticker that drains at most one frame per tick, this tracks
+// a virtual "next send time" that advances by exactly one frame interval
+// per packet sent: when running on schedule it sleeps to hold the pace: but
+// when it's fallen behind (a slow WriteAudioPacket call, GC, scheduler
+// preemption, whatever), it sends immediately instead of waiting for the
+// next tick boundary and resumes pacing from there. That catches up in one
+// step instead of bleeding the backlog out one frame per tick, so a brief
+// stall doesn't cost extra frames off the front of outboundQueueDepth's
+// buffer on top of whatever the stall itself delayed.
 func (p *Peer) paceOutboundAudio(queue <-chan outboundFrame) {
-	ticker := time.NewTicker(outboundPaceInterval)
-	defer ticker.Stop()
-	for range ticker.C {
-		select {
-		case frame, ok := <-queue:
-			if !ok {
-				return
-			}
-			if p.mumble == nil {
-				continue
-			}
-			if err := p.mumble.WriteAudioPacket(0, frame.seq, false, frame.data); err != nil {
-				log.Printf("peer %s: write audio: %v", p.id, err)
-				return
-			}
-		default:
-			// Browser paused sending (mute, or between talk spurts); nothing
-			// queued this tick.
+	var nextSend time.Time
+	for frame := range queue {
+		now := time.Now()
+		if nextSend.Before(now) {
+			nextSend = now
+		} else {
+			time.Sleep(nextSend.Sub(now))
+		}
+		nextSend = nextSend.Add(outboundPaceInterval)
+
+		if p.mumble == nil {
+			continue
+		}
+		if err := p.mumble.WriteAudioPacket(0, frame.seq, false, frame.data); err != nil {
+			log.Printf("peer %s: write audio: %v", p.id, err)
+			return
 		}
 	}
 }
