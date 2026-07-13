@@ -3,6 +3,61 @@
 // and dynamically relays whichever sessions are talking onto them.
 const REMOTE_SLOTS = 5
 
+// Naive loudness-based transmission gate: no VAD model, just RMS audio
+// level compared to a fixed threshold. Trades accuracy (any loud sound
+// triggers it — a knock, a cough, typing — not just speech) for zero
+// inference latency, zero model weight/dependency, and a much simpler
+// implementation. A real VAD is a possible future upgrade; deliberately
+// not doing that here.
+const LOUDNESS_THRESHOLD = 0.01 // RMS of samples in [-1, 1]; tune by ear
+// How long to keep transmitting after the last loud sample before gating
+// closed again — avoids chopping speech into fragments at every brief dip
+// below threshold (a pause for breath, a soft consonant).
+const LOUDNESS_REDEMPTION_MS = 500
+// Samples per RMS window inside the worklet (see LOUDNESS_WORKLET_SOURCE) —
+// 256 at 48kHz is ~5.3ms, matching a run of 2 render quantums (128 samples
+// each). Small enough to react quickly, large enough that postMessage
+// back to the main thread isn't firing on every single quantum. Shrunk
+// from an initial 512 (~10.7ms) after still-clipped speech onsets — this
+// window is the dominant term in the gate's total decision latency, so
+// halving it directly shaves latency off every onset.
+const LOUDNESS_WORKLET_WINDOW_SAMPLES = 256
+
+// Runs on the dedicated audio rendering thread, not the main thread, so
+// unlike a setInterval/AnalyserNode poll it (a) never misses any audio —
+// every sample delivered gets included in exactly one RMS window, versus
+// a poll that only ever sees an AnalyserNode's most recent snapshot and
+// can go long stretches without looking at anything in between — and
+// (b) keeps running even when the tab is backgrounded, since browsers
+// don't throttle Web Audio's rendering thread the way they throttle
+// timers. Inlined via a Blob URL rather than a separate vendored asset
+// file (contrast the old ONNX-based VAD's worklet bundle) since this is
+// a few lines of plain RMS math, not a model runtime.
+const LOUDNESS_WORKLET_SOURCE = `
+class LoudnessProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super()
+    this.buffer = new Float32Array(${LOUDNESS_WORKLET_WINDOW_SAMPLES})
+    this.filled = 0
+  }
+  process(inputs) {
+    const channel = inputs[0]?.[0]
+    if (!channel) return true
+    for (let i = 0; i < channel.length; i++) {
+      this.buffer[this.filled++] = channel[i]
+      if (this.filled === this.buffer.length) {
+        let sumSquares = 0
+        for (const sample of this.buffer) sumSquares += sample * sample
+        this.port.postMessage(Math.sqrt(sumSquares / this.buffer.length))
+        this.filled = 0
+      }
+    }
+    return true
+  }
+}
+registerProcessor('loudness-processor', LoudnessProcessor)
+`
+
 // forceOpusCBR appends constant-bitrate parameters to the opus fmtp line(s)
 // in an SDP offer before it's sent. Diagnostic/mitigation for a suspected
 // cause of intermittent garbled audio: WebRTC's opus encoder adaptively
@@ -66,6 +121,11 @@ export class MumbleWebRTCClient {
   private remoteAudioEls = new Map<string, HTMLAudioElement>()
   private manuallyMuted = false
   private micTrack: MediaStreamTrack | null = null
+  private audioSender: RTCRtpSender | null = null
+  private audioCtx: AudioContext | null = null
+  private loudnessNode: AudioWorkletNode | null = null
+  private loudnessSilenceTimer: number | null = null
+  private loudEnough = false
 
   constructor(
     private events: ClientEvents,
@@ -209,7 +269,46 @@ export class MumbleWebRTCClient {
     // silently claim one of the REMOTE_SLOTS recvonly transceivers created
     // above instead of getting a dedicated line, throwing off the 1:1
     // mapping the bridge's track pool assumes.
-    this.pc.addTransceiver(micTrack, { direction: 'sendrecv', streams: [stream] })
+    const transceiver = this.pc.addTransceiver(micTrack, { direction: 'sendrecv', streams: [stream] })
+    this.audioSender = transceiver.sender
+
+    // Loudness gate: an AudioWorkletNode tapping `stream` directly,
+    // independent of whatever the RTP sender currently references — see
+    // LOUDNESS_WORKLET_SOURCE for why a worklet instead of a poll. Starts
+    // silent, like Mumble's voice-activation mode, until the first loud
+    // window.
+    this.audioCtx = new AudioContext()
+    const micSource = this.audioCtx.createMediaStreamSource(stream)
+    const workletURL = URL.createObjectURL(
+      new Blob([LOUDNESS_WORKLET_SOURCE], { type: 'application/javascript' }),
+    )
+    try {
+      await this.audioCtx.audioWorklet.addModule(workletURL)
+    } finally {
+      URL.revokeObjectURL(workletURL)
+    }
+    this.loudnessNode = new AudioWorkletNode(this.audioCtx, 'loudness-processor')
+    micSource.connect(this.loudnessNode)
+    this.loudnessNode.port.onmessage = (evt: MessageEvent<number>) => {
+      const rms = evt.data
+      if (rms >= LOUDNESS_THRESHOLD) {
+        if (this.loudnessSilenceTimer !== null) {
+          clearTimeout(this.loudnessSilenceTimer)
+          this.loudnessSilenceTimer = null
+        }
+        if (!this.loudEnough) {
+          this.loudEnough = true
+          this.updateTransmission()
+        }
+      } else if (this.loudEnough && this.loudnessSilenceTimer === null) {
+        this.loudnessSilenceTimer = window.setTimeout(() => {
+          this.loudnessSilenceTimer = null
+          this.loudEnough = false
+          this.updateTransmission()
+        }, LOUDNESS_REDEMPTION_MS)
+      }
+    }
+
     this.updateTransmission()
 
     const offer = await this.pc.createOffer()
@@ -224,31 +323,27 @@ export class MumbleWebRTCClient {
     this.updateTransmission()
   }
 
-  // Silences outgoing audio when manually muted.
+  // Stops audio leaving the browser entirely (rather than just having the
+  // server drop it) whenever manually muted or the loudness gate isn't
+  // triggered — matching a native client's voice-activation mode: no RTP
+  // packets at all during silence, not just silent ones, so it doesn't
+  // waste bandwidth or show as "talking" to other Mumble users. Gated via
+  // replaceTrack, not MediaStreamTrack.enabled — a disabled track is
+  // silent for every consumer of the underlying stream, not just the RTP
+  // sender, which would silence the AnalyserNode's own input too since it
+  // taps the same stream (see startWebRTC).
   //
-  // VAD-gated auto-mute was tried twice here and removed both times — see
-  // git history (frontend/src/client.ts prior to 2026-07-12) if picking
-  // this back up. replaceTrack(null) between talk spurts caused real gaps
-  // in the RTP sequence (audible as choppiness, not just irregular timing
-  // an outbound pacer could smooth over) — VAD toggles on brief pauses
-  // within normal speech far more than expected. Switching to
-  // MediaStreamTrack.enabled kept the stream continuous, but a disabled
-  // track is silent for every consumer of it, not just the outgoing RTP
-  // sender — reusing one stream deadlocked VAD's own analysis (it starts
-  // "not speaking", which disabled the track, which silenced what VAD
-  // itself was listening to, so it could never detect speech to turn back
-  // on), and even after fixing that with a second independent capture, the
-  // stream was still choppy — and "transmitting silence" defeats the
-  // point of a voice-activation indicator for other Mumble users anyway,
-  // who'd see this client as talking constantly. Needs a real design (per
-  // Mumble's own protocol, actually stopping/restarting transmission
-  // between talk spurts without desyncing the receiving decoder is what
-  // native clients do — see the "final" packet handling in
-  // internal/mumble), not another quick patch.
+  // Earlier VAD-gated auto-mute attempts (see git history prior to
+  // 2026-07-12) blamed replaceTrack(null) between talk spurts for real gaps
+  // in the RTP sequence number, audible as choppiness. That diagnosis
+  // doesn't hold anymore: the actual bug (fixed in bridge/peer.go) was that
+  // the bridge derived Mumble's outgoing sequence number from RTP
+  // sequence-number gaps, unrelated to WebRTC's own RTP numbering and wrong
+  // regardless of VAD. The bridge no longer looks at RTP sequence numbers
+  // at all, so replaceTrack can't desync it.
   private updateTransmission(): void {
-    if (this.micTrack) {
-      this.micTrack.enabled = !this.manuallyMuted
-    }
+    const shouldTransmit = !this.manuallyMuted && this.loudEnough
+    this.audioSender?.replaceTrack(shouldTransmit ? this.micTrack : null)
   }
 
   sendText(message: string): void {
@@ -261,7 +356,18 @@ export class MumbleWebRTCClient {
   }
 
   private cleanup(): void {
+    if (this.loudnessSilenceTimer !== null) {
+      clearTimeout(this.loudnessSilenceTimer)
+      this.loudnessSilenceTimer = null
+    }
     this.manuallyMuted = false
+    this.loudEnough = false
+    this.audioSender = null
+    this.loudnessNode?.port.close()
+    this.loudnessNode?.disconnect()
+    this.loudnessNode = null
+    void this.audioCtx?.close()
+    this.audioCtx = null
     this.micTrack?.stop()
     this.micTrack = null
     this.pc?.close()
