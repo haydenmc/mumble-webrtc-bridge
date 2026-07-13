@@ -47,9 +47,15 @@ func (c *Client) handleCryptSetup(data []byte) error {
 
 	switch {
 	case len(p.Key) > 0 && len(p.ClientNonce) > 0 && len(p.ServerNonce) > 0:
-		c.cryptMu.Lock()
+		// Touches both EncryptIV and DecryptIV together; hold both locks.
+		// Safe from deadlock since this is the only place both are ever
+		// taken together, and it happens once, before the UDP goroutines
+		// (which take them individually) are even started below.
+		c.encryptMu.Lock()
+		c.decryptMu.Lock()
 		err := c.crypt.SetKey(cryptstate.ModeOCB2AES128, p.Key, p.ClientNonce, p.ServerNonce)
-		c.cryptMu.Unlock()
+		c.decryptMu.Unlock()
+		c.encryptMu.Unlock()
 		if err != nil {
 			return err
 		}
@@ -60,18 +66,18 @@ func (c *Client) handleCryptSetup(data []byte) error {
 		return nil
 
 	case len(p.ServerNonce) > 0:
-		c.cryptMu.Lock()
+		c.decryptMu.Lock()
 		err := c.crypt.SetDecryptIV(p.ServerNonce)
-		c.cryptMu.Unlock()
+		c.decryptMu.Unlock()
 		return err
 
 	default:
 		if !c.cryptReady.Load() {
 			return nil
 		}
-		c.cryptMu.Lock()
+		c.encryptMu.Lock()
 		nonce := append([]byte(nil), c.crypt.EncryptIV...)
-		c.cryptMu.Unlock()
+		c.encryptMu.Unlock()
 		return c.conn.writeProto(&MumbleProto.CryptSetup{ClientNonce: nonce})
 	}
 }
@@ -111,13 +117,13 @@ func (c *Client) udpReadLoop(udpConn *net.UDPConn) {
 			return
 		}
 
-		c.cryptMu.Lock()
+		c.decryptMu.Lock()
 		decErr := c.crypt.Decrypt(plain, buf[:n])
 		plainLen := 0
 		if decErr == nil {
 			plainLen = n - c.crypt.Overhead()
 		}
-		c.cryptMu.Unlock()
+		c.decryptMu.Unlock()
 
 		if decErr != nil || plainLen <= 0 {
 			continue
@@ -193,16 +199,17 @@ func (c *Client) tryWriteUDP(frame []byte) bool {
 // across calls rather than allocated fresh each time — this runs once per
 // outbound audio packet, tens of times a second) and writes it to udpConn.
 //
-// Encrypt and write happen atomically under cryptMu: Mumble's crypt IV is a
-// strict per-connection counter, so if this and udpPingLoop's send() both
+// Encrypt and write happen atomically under encryptMu: Mumble's crypt IV is
+// a strict per-connection counter, so if this and udpPingLoop's send() both
 // encrypted (bumping the IV) before either wrote to the socket, whichever
 // write lost the race would arrive with an IV out of sequence. The server's
 // decrypt state machine tolerates loss but not reordering, and feeding Opus
 // frames to the decoder out of order produces severe distortion. Holding
 // the lock across the write serializes encrypt+send as one atomic unit
-// against the other UDP sender.
+// against the other UDP sender — but never against udpReadLoop's Decrypt,
+// which uses the separate decryptMu.
 func (c *Client) encryptAndSendUDP(udpConn *net.UDPConn, plain []byte) error {
-	c.cryptMu.Lock()
+	c.encryptMu.Lock()
 	need := len(plain) + c.crypt.Overhead()
 	if cap(c.udpSendBuf) < need {
 		c.udpSendBuf = make([]byte, need)
@@ -210,6 +217,6 @@ func (c *Client) encryptAndSendUDP(udpConn *net.UDPConn, plain []byte) error {
 	ct := c.udpSendBuf[:need]
 	c.crypt.Encrypt(ct, plain)
 	_, err := udpConn.Write(ct)
-	c.cryptMu.Unlock()
+	c.encryptMu.Unlock()
 	return err
 }

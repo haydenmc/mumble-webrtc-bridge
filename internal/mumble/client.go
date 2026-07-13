@@ -47,8 +47,18 @@ type Client struct {
 	channels map[uint32]*Channel
 
 	// audio: crypt state + UDP voice channel. See udp.go.
+	//
+	// encryptMu and decryptMu are separate (rather than one lock for the
+	// whole CryptState) so that decrypting another Mumble user's incoming
+	// audio can never make our own outgoing audio/ping sends wait, or vice
+	// versa: Encrypt only touches EncryptIV, Decrypt only touches
+	// DecryptIV/decryptHistory/stats, and the underlying AES cipher.Block
+	// is safe for concurrent use, so the two directions have no shared
+	// mutable state once the initial key exchange (which does touch both,
+	// see handleCryptSetup) has completed.
 	crypt       cryptstate.CryptState
-	cryptMu     sync.Mutex
+	encryptMu   sync.Mutex
+	decryptMu   sync.Mutex
 	cryptReady  atomic.Bool
 	udpAddr     *net.UDPAddr
 	udpConn     atomic.Pointer[net.UDPConn]
@@ -56,8 +66,8 @@ type Client struct {
 	udpLastRecv atomic.Int64 // unix nano of last successfully-decrypted UDP packet
 	// udpSendBuf is scratch space for UDP ciphertext, reused across sends
 	// (audio and ping) rather than allocated fresh per packet. Safe because
-	// every write to it happens while holding cryptMu, which both senders
-	// already need for crypt.Encrypt itself.
+	// every write to it happens while holding encryptMu, which both
+	// senders already need for crypt.Encrypt itself.
 	udpSendBuf []byte
 
 	handshakeDone chan error
