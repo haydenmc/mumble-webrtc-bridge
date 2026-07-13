@@ -1,3 +1,5 @@
+import { MicVAD } from '@ricky0123/vad-web'
+
 // Must match remoteTrackSlots in bridge/peer.go: the bridge pre-negotiates
 // this many outbound tracks, one per potential simultaneous Mumble speaker,
 // and dynamically relays whichever sessions are talking onto them.
@@ -66,6 +68,9 @@ export class MumbleWebRTCClient {
   private remoteAudioEls = new Map<string, HTMLAudioElement>()
   private manuallyMuted = false
   private micTrack: MediaStreamTrack | null = null
+  private audioSender: RTCRtpSender | null = null
+  private vad: MicVAD | null = null
+  private vadSpeaking = false
 
   constructor(
     private events: ClientEvents,
@@ -209,7 +214,43 @@ export class MumbleWebRTCClient {
     // silently claim one of the REMOTE_SLOTS recvonly transceivers created
     // above instead of getting a dedicated line, throwing off the 1:1
     // mapping the bridge's track pool assumes.
-    this.pc.addTransceiver(micTrack, { direction: 'sendrecv', streams: [stream] })
+    const transceiver = this.pc.addTransceiver(micTrack, { direction: 'sendrecv', streams: [stream] })
+    this.audioSender = transceiver.sender
+
+    // Voice-activity gate: reuses the same mic stream already flowing to the
+    // sender rather than opening a second capture — VAD attaches its own
+    // MediaStreamAudioSourceNode directly to `stream` via getStream() below,
+    // which is independent of whatever the RTP sender currently references,
+    // so toggling the sender's track (see updateTransmission) never affects
+    // what VAD itself is listening to. Starts silent (like Mumble's
+    // voice-activation mode) until speech is first detected — this only
+    // controls whether audio actually leaves the browser, independent of
+    // manual mute, which is the only thing reported to the server/other
+    // Mumble users.
+    this.vad = await MicVAD.new({
+      model: 'v5',
+      baseAssetPath: '/vad/',
+      onnxWASMBasePath: '/vad/',
+      getStream: async () => stream,
+      pauseStream: async () => {},
+      resumeStream: async () => stream,
+      // Shorter than the library default (1400ms), which is tuned for not
+      // truncating recorded speech segments rather than snappy cutoff.
+      redemptionMs: 600,
+      onSpeechStart: () => {
+        this.vadSpeaking = true
+        this.updateTransmission()
+      },
+      onSpeechEnd: () => {
+        this.vadSpeaking = false
+        this.updateTransmission()
+      },
+      onVADMisfire: () => {
+        this.vadSpeaking = false
+        this.updateTransmission()
+      },
+    })
+    this.vad.start()
     this.updateTransmission()
 
     const offer = await this.pc.createOffer()
@@ -224,31 +265,24 @@ export class MumbleWebRTCClient {
     this.updateTransmission()
   }
 
-  // Silences outgoing audio when manually muted.
+  // Stops audio leaving the browser entirely (rather than just having the
+  // server drop it) whenever manually muted or VAD isn't hearing speech —
+  // matching a native client's voice-activation mode, including not
+  // showing as "talking" to other Mumble users during silence.
   //
-  // VAD-gated auto-mute was tried twice here and removed both times — see
-  // git history (frontend/src/client.ts prior to 2026-07-12) if picking
-  // this back up. replaceTrack(null) between talk spurts caused real gaps
-  // in the RTP sequence (audible as choppiness, not just irregular timing
-  // an outbound pacer could smooth over) — VAD toggles on brief pauses
-  // within normal speech far more than expected. Switching to
-  // MediaStreamTrack.enabled kept the stream continuous, but a disabled
-  // track is silent for every consumer of it, not just the outgoing RTP
-  // sender — reusing one stream deadlocked VAD's own analysis (it starts
-  // "not speaking", which disabled the track, which silenced what VAD
-  // itself was listening to, so it could never detect speech to turn back
-  // on), and even after fixing that with a second independent capture, the
-  // stream was still choppy — and "transmitting silence" defeats the
-  // point of a voice-activation indicator for other Mumble users anyway,
-  // who'd see this client as talking constantly. Needs a real design (per
-  // Mumble's own protocol, actually stopping/restarting transmission
-  // between talk spurts without desyncing the receiving decoder is what
-  // native clients do — see the "final" packet handling in
-  // internal/mumble), not another quick patch.
+  // VAD-gated auto-mute was tried and reverted twice before this (see git
+  // history prior to 2026-07-12): replaceTrack(null) between talk spurts
+  // was blamed for real gaps in the RTP sequence number, audible as
+  // choppiness. That diagnosis no longer holds — the actual bug (fixed in
+  // bridge/peer.go) was that the bridge derived Mumble's outgoing sequence
+  // number from RTP sequence-number gaps, which was wrong on two counts:
+  // Mumble's sequence counter is a 10ms-frame clock, not a packet counter,
+  // and it has nothing to do with WebRTC's own RTP numbering in the first
+  // place. The bridge no longer looks at RTP sequence numbers at all, so a
+  // gap from replaceTrack (or anything else) can't desync it anymore.
   private updateTransmission(): void {
-    if (this.micTrack) {
-      this.micTrack.enabled = !this.manuallyMuted
-    }
+    const shouldTransmit = !this.manuallyMuted && this.vadSpeaking
+    this.audioSender?.replaceTrack(shouldTransmit ? this.micTrack : null)
   }
 
   sendText(message: string): void {
@@ -261,7 +295,11 @@ export class MumbleWebRTCClient {
   }
 
   private cleanup(): void {
+    this.vad?.destroy()
+    this.vad = null
     this.manuallyMuted = false
+    this.vadSpeaking = false
+    this.audioSender = null
     this.micTrack?.stop()
     this.micTrack = null
     this.pc?.close()
