@@ -89,10 +89,6 @@ loginForm.addEventListener('submit', (e) => {
 
   currentUsername = username
   client = createClient()
-  // TEMPORARY diagnostic: exposes the client on window so
-  // client.downloadDebugRecording() works from the DevTools console (a
-  // module-scoped `client` isn't otherwise reachable from there).
-  ;(window as unknown as { client: typeof client }).client = client
   client.connect(username, password)
 })
 

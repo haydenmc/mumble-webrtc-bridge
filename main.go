@@ -48,9 +48,6 @@ func main() {
 		go srv.HandleConn(conn)
 	})
 
-	// TEMPORARY diagnostic endpoint — see bridge.Server.ServeDebugRecording.
-	http.HandleFunc("/debug/recording", srv.ServeDebugRecording)
-
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		log.Printf("listening on %s (TLS)", cfg.HTTPAddr)
 		log.Fatal(http.ListenAndServeTLS(cfg.HTTPAddr, cfg.TLSCert, cfg.TLSKey, nil))
