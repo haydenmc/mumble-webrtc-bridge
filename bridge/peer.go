@@ -4,7 +4,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"strings"
 	"sync"
@@ -54,22 +53,6 @@ type Peer struct {
 
 	muted  atomic.Bool
 	seqNum atomic.Int64
-
-	// recordOutBuf/recordInBuf are ring buffers of the most recent Opus
-	// packets crossing this peer in each direction, exposed via
-	// /debug/recording so they can be dumped to a real playable file:
-	// recordOut is what the bridge received from the browser (before
-	// anything downstream — our own send encoding, Mumble's relay — touches
-	// it); recordIn is whatever Mumble relays back to this peer (from
-	// other sessions, including e.g. a second bridge session used as a
-	// loopback listener while a first session talks). Comparing the two
-	// isolates whether garbled audio is already present in what the browser
-	// sends, or only appears after a round trip through Mumble. TEMPORARY
-	// diagnostic.
-	recordOutMu  sync.Mutex
-	recordOutBuf []recordedOpusPacket
-	recordInMu   sync.Mutex
-	recordInBuf  []recordedOpusPacket
 
 	// slotsReady guards against Mumble audio arriving (on the mumble.Client's
 	// internal goroutine, which can run concurrently with handleLogin/
@@ -386,8 +369,6 @@ func (p *Peer) handleMute(muted bool) {
 // handleMumbleAudio relays one Mumble user's raw Opus packet to whichever
 // pooled WebRTC track their session is (or becomes) assigned to.
 func (p *Peer) handleMumbleAudio(session uint32, opus []byte) {
-	p.recordOpus(&p.recordInMu, &p.recordInBuf, opus)
-
 	if !p.slotsReady.Load() {
 		// setupWebRTC (called after mumble.Dial returns) hasn't populated
 		// the track pool yet; drop this packet rather than race it.
@@ -483,7 +464,6 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 		if p.muted.Load() || p.mumble == nil {
 			continue
 		}
-		p.recordOpus(&p.recordOutMu, &p.recordOutBuf, rtp.Payload)
 
 		// Mumble voice-packet sequence numbers count 10ms frames, not
 		// packets: the receiving client schedules playback at
@@ -535,63 +515,4 @@ func (p *Peer) close() {
 		}
 		_ = p.ws.Close()
 	})
-}
-
-// recordBufCapacity bounds recordBuf to roughly the last minute of audio at
-// a nominal 50 packets/sec (20ms frames).
-const recordBufCapacity = 3000
-
-type recordedOpusPacket struct {
-	data    []byte
-	samples int64
-}
-
-// recordOpusPacket appends payload to the ring buffer backing
-// /debug/recording, evicting the oldest packet once full. TEMPORARY
-// diagnostic — see the recordBuf field comment.
-// recordOpus appends payload to the given ring buffer (recordOutBuf or
-// recordInBuf), evicting the oldest packet once full. TEMPORARY diagnostic
-// — see the recordOutBuf/recordInBuf field comment.
-func (p *Peer) recordOpus(mu *sync.Mutex, buf *[]recordedOpusPacket, payload []byte) {
-	samples := int64(opusFrameDuration(payload) * 48000 / time.Second)
-	// payload's backing array may be reused by the caller; copy before
-	// retaining (true for both the pion RTP path and Mumble's own decode
-	// buffer reuse).
-	cp := append([]byte(nil), payload...)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(*buf) >= recordBufCapacity {
-		*buf = (*buf)[1:]
-	}
-	*buf = append(*buf, recordedOpusPacket{data: cp, samples: samples})
-}
-
-// writeDebugRecording dumps the current contents of recordOutBuf (out) or
-// recordInBuf (in) as an Ogg Opus file. TEMPORARY diagnostic — see the
-// recordOutBuf/recordInBuf field comment.
-func (p *Peer) writeDebugRecording(w io.Writer, direction string) error {
-	mu, buf := &p.recordOutMu, &p.recordOutBuf
-	if direction == "in" {
-		mu, buf = &p.recordInMu, &p.recordInBuf
-	}
-
-	mu.Lock()
-	packets := append([]recordedOpusPacket(nil), *buf...)
-	mu.Unlock()
-
-	// Channel count matches what was observed in the TOC's stereo bit
-	// during diagnosis (WebRTC's opus encoder commonly sets this
-	// regardless of actual source channel count); using anything else
-	// would make some players refuse to play the file.
-	ow, err := newOggOpusWriter(w, uint32(time.Now().UnixNano()), 2, 48000)
-	if err != nil {
-		return err
-	}
-	for _, pkt := range packets {
-		if err := ow.WritePacket(pkt.data, pkt.samples); err != nil {
-			return err
-		}
-	}
-	return ow.Close()
 }
