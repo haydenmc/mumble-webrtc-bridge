@@ -3,14 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Mumble WebRTC Bridge</title>
+  <title>{{.Title}}</title>
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
   <!-- Login view -->
   <div id="view-login" class="view">
     <div class="card">
-      <h1>Mumble Bridge</h1>
+      <h1>{{.Title}}</h1>
+      {{if .About}}<p class="about">{{.About}}</p>{{end}}
       <form id="login-form">
         <label for="username">Username</label>
         <input id="username" type="text" placeholder="YourName" autocomplete="username" required />
