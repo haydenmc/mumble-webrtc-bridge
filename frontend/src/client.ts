@@ -382,8 +382,21 @@ export class MumbleWebRTCClient {
     if (this.rnnoiseEnabled) {
       try {
         await this.audioCtx.audioWorklet.addModule(NoiseSuppressorWorkletUrl)
-        this.rnnoiseNode = new AudioWorkletNode(this.audioCtx, NoiseSuppressorWorklet_Name)
-        const dest = this.audioCtx.createMediaStreamDestination()
+        // Force mono I/O. The worklet only ever writes channel 0 of its
+        // output; if the mic delivers a stereo stream the node would default
+        // to two output channels (channelCountMode 'max') and leave the
+        // right channel silent, so listeners hear the speaker in their left
+        // ear only. Explicit mono also downmixes a stereo mic to one channel
+        // before denoising, which is what we want for voice anyway.
+        this.rnnoiseNode = new AudioWorkletNode(this.audioCtx, NoiseSuppressorWorklet_Name, {
+          channelCount: 1,
+          channelCountMode: 'explicit',
+          channelInterpretation: 'speakers',
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        })
+        const dest = new MediaStreamAudioDestinationNode(this.audioCtx, { channelCount: 1 })
         micSource.connect(this.rnnoiseNode)
         this.rnnoiseNode.connect(dest)
         sendStream = dest.stream
