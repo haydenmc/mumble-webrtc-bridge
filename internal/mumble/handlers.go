@@ -3,8 +3,8 @@ package mumble
 import (
 	"errors"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/MumbleProto"
+	"google.golang.org/protobuf/proto"
 )
 
 func (c *Client) handleReject(data []byte) error {

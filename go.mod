@@ -3,11 +3,11 @@ module github.com/hayden/mumble-webrtc-bridge
 go 1.26.0
 
 require (
-	github.com/golang/protobuf v1.5.4
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/pion/rtp v1.10.2
 	github.com/pion/webrtc/v4 v4.2.16
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -30,5 +30,4 @@ require (
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	google.golang.org/protobuf v1.33.0 // indirect
 )

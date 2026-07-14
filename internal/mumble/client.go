@@ -21,9 +21,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/MumbleProto"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/cryptstate"
+	"google.golang.org/protobuf/proto"
 )
 
 // clientVersion is encoded as (major<<16 | minor<<8 | patch), matching the
@@ -136,7 +136,7 @@ func Dial(addr string, tlsConfig *tls.Config, cfg *Config) (*Client, error) {
 	go c.pingLoop()
 
 	version := &MumbleProto.Version{
-		Version:   proto.Uint32(clientVersion),
+		VersionV1: proto.Uint32(clientVersion),
 		Release:   proto.String("mumble-webrtc-bridge"),
 		Os:        proto.String(runtime.GOOS),
 		OsVersion: proto.String(runtime.GOARCH),
