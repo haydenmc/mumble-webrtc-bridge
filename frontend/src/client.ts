@@ -89,23 +89,41 @@ function forceOpusCBR(sdp: string): string {
   })
 }
 
+export interface UserInfo {
+  name: string
+  muted: boolean
+  selfMuted: boolean
+  deafened: boolean
+  selfDeafened: boolean
+}
+
+export type RoomEventKind = 'joined' | 'left' | 'muted' | 'unmuted' | 'deafened' | 'undeafened'
+
 export type ServerMsg =
   | { type: 'connected' }
   | { type: 'error'; message: string }
   | { type: 'sdp'; sdpType: string; sdp: string }
   | { type: 'ice'; candidate: string; sdpMid: string; sdpMLineIndex: number }
   | { type: 'text'; from: string; message: string }
-  | { type: 'user_list'; users: string[] }
+  | { type: 'user_list'; users: UserInfo[] }
   | { type: 'user_joined'; username: string }
   | { type: 'user_left'; username: string }
+  | { type: 'mute_state'; username: string; muted: boolean; selfMuted: boolean }
+  | { type: 'deaf_state'; username: string; deafened: boolean; selfDeafened: boolean }
+  | { type: 'talking'; username: string; talking: boolean }
+  | { type: 'room_event'; kind: RoomEventKind; username: string }
 
 export interface ClientEvents {
   onConnected: () => void
   onError: (msg: string) => void
   onText: (from: string, message: string) => void
-  onUserList: (users: string[]) => void
+  onUserList: (users: UserInfo[]) => void
   onUserJoined: (username: string) => void
   onUserLeft: (username: string) => void
+  onMuteState: (username: string, muted: boolean, selfMuted: boolean) => void
+  onDeafState: (username: string, deafened: boolean, selfDeafened: boolean) => void
+  onTalking: (username: string, talking: boolean) => void
+  onRoomEvent: (kind: RoomEventKind, username: string) => void
   onDisconnected: () => void
 }
 
@@ -126,6 +144,8 @@ export class MumbleWebRTCClient {
   private loudnessNode: AudioWorkletNode | null = null
   private loudnessSilenceTimer: number | null = null
   private loudEnough = false
+  private username = ''
+  private selfTalking = false
 
   constructor(
     private events: ClientEvents,
@@ -135,6 +155,7 @@ export class MumbleWebRTCClient {
   ) {}
 
   connect(username: string, password: string): void {
+    this.username = username
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const wsURL = `${proto}://${location.host}/ws`
 
@@ -202,6 +223,22 @@ export class MumbleWebRTCClient {
 
       case 'user_left':
         this.events.onUserLeft(msg.username)
+        break
+
+      case 'mute_state':
+        this.events.onMuteState(msg.username, msg.muted, msg.selfMuted)
+        break
+
+      case 'deaf_state':
+        this.events.onDeafState(msg.username, msg.deafened, msg.selfDeafened)
+        break
+
+      case 'talking':
+        this.events.onTalking(msg.username, msg.talking)
+        break
+
+      case 'room_event':
+        this.events.onRoomEvent(msg.kind, msg.username)
         break
     }
   }
@@ -344,6 +381,14 @@ export class MumbleWebRTCClient {
   private updateTransmission(): void {
     const shouldTransmit = !this.manuallyMuted && this.loudEnough
     this.audioSender?.replaceTrack(shouldTransmit ? this.micTrack : null)
+
+    // Self-talking never round-trips through the server — the bridge's
+    // OnAudio callback only sees other sessions' incoming packets, never
+    // this browser's own outgoing ones — so it's reported locally instead.
+    if (shouldTransmit !== this.selfTalking) {
+      this.selfTalking = shouldTransmit
+      this.events.onTalking(this.username, shouldTransmit)
+    }
   }
 
   sendText(message: string): void {
@@ -362,6 +407,7 @@ export class MumbleWebRTCClient {
     }
     this.manuallyMuted = false
     this.loudEnough = false
+    this.selfTalking = false
     this.audioSender = null
     this.loudnessNode?.port.close()
     this.loudnessNode?.disconnect()

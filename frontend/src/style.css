@@ -135,9 +135,40 @@ button[type="submit"]:disabled,
 }
 
 #user-list li {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
   padding: .4rem .5rem;
   border-radius: 4px;
   font-size: .95rem;
+  border: 1px solid transparent;
+  transition: border-color .1s, background .1s;
+}
+
+#user-list li .user-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#user-list li .icon-muted,
+#user-list li .icon-deafened {
+  display: none;
+  font-size: .85rem;
+  opacity: .8;
+}
+
+#user-list li.is-muted .icon-muted,
+#user-list li.is-deafened .icon-deafened {
+  display: inline;
+}
+
+/* Talking indicator: a live speaking glow, distinct from the static
+   muted/deafened badges above. */
+#user-list li.is-talking {
+  border-color: #3ddc84;
+  background: rgba(61, 220, 132, .12);
 }
 
 .controls {
@@ -200,6 +231,17 @@ button[type="submit"]:disabled,
 .message .from {
   font-weight: 600;
   color: var(--highlight);
+}
+
+.message .timestamp {
+  color: var(--text-muted);
+  font-size: .8rem;
+  margin-right: .4rem;
+}
+
+.chat-event {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 #chat-form {

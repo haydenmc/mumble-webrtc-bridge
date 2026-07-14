@@ -329,19 +329,36 @@ func (c *Client) Self() *User {
 	return c.self
 }
 
-// SelfChannelUsers returns the names of users in the client's current
+// SelfChannelUsers returns the status of users in the client's current
 // channel (including the client itself).
-func (c *Client) SelfChannelUsers() []string {
+func (c *Client) SelfChannelUsers() []UserStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.self == nil || c.self.Channel == nil {
 		return nil
 	}
-	names := make([]string, 0, len(c.self.Channel.Users))
+	statuses := make([]UserStatus, 0, len(c.self.Channel.Users))
 	for _, u := range c.self.Channel.Users {
-		names = append(names, u.Name)
+		statuses = append(statuses, UserStatus{
+			Name:         u.Name,
+			Muted:        u.Muted,
+			SelfMuted:    u.SelfMuted,
+			Deafened:     u.Deafened,
+			SelfDeafened: u.SelfDeafened,
+		})
 	}
-	return names
+	return statuses
+}
+
+// UserName returns the display name of the user with the given session, or
+// "" if unknown.
+func (c *Client) UserName(session uint32) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if u := c.users[session]; u != nil {
+		return u.Name
+	}
+	return ""
 }
 
 // JoinChannel moves the client into the channel at the given path (by
@@ -383,5 +400,17 @@ func (c *Client) SetSelfMuted(muted bool) error {
 	return c.conn.writeProto(&MumbleProto.UserState{
 		Session:  &session,
 		SelfMute: &muted,
+	})
+}
+
+// SetSelfDeafened sets the client's own self-deafen flag, visible to other
+// users.
+func (c *Client) SetSelfDeafened(deaf bool) error {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	return c.conn.writeProto(&MumbleProto.UserState{
+		Session:  &session,
+		SelfDeaf: &deaf,
 	})
 }

@@ -31,11 +31,25 @@ const remoteTrackSlots = 5
 const slotIdleTimeout = 500 * time.Millisecond
 const slotReapInterval = 250 * time.Millisecond
 
+// talkIdleTimeout is how long a session's audio can go quiet before the
+// browser's "talking" indicator for it is cleared. Shorter than
+// slotIdleTimeout since this only drives a UI cue, not track-pool
+// reassignment, and packets normally arrive every ~20ms while someone is
+// actually speaking.
+const talkIdleTimeout = 300 * time.Millisecond
+
 // trackSlot binds one pooled outbound WebRTC track to whichever Mumble
 // session is currently occupying it (session 0 means free).
 type trackSlot struct {
 	track      *webrtc.TrackLocalStaticSample
 	session    uint32
+	lastActive time.Time
+}
+
+// talkEntry is one session's talking-indicator bookkeeping; see the
+// talking field on Peer.
+type talkEntry struct {
+	name       string
 	lastActive time.Time
 }
 
@@ -62,6 +76,15 @@ type Peer struct {
 	slotsMu    sync.Mutex
 	slots      [remoteTrackSlots]*trackSlot
 
+	// talking tracks, per Mumble session, the last time audio was received
+	// from them — used to drive the browser's talking indicator. Separate
+	// from slots: audio for a session arrives via OnAudio regardless of
+	// whether it currently holds a track slot. The name is cached alongside
+	// the timestamp so the reaper can announce talking-stop without needing
+	// a live *mumble.Client reference (the session may since have left).
+	talkMu  sync.Mutex
+	talking map[uint32]talkEntry
+
 	closeCh   chan struct{}
 	closeOnce sync.Once
 }
@@ -71,6 +94,7 @@ func newPeer(ws *websocket.Conn, srv *Server) *Peer {
 		id:      uuid.New().String(),
 		ws:      ws,
 		srv:     srv,
+		talking: make(map[uint32]talkEntry),
 		closeCh: make(chan struct{}),
 	}
 }
@@ -163,15 +187,38 @@ func (p *Peer) handleLogin(username, password string) error {
 		},
 		OnUserJoined: func(mc *mumble.Client, name string) {
 			p.sendWS(mustMarshal(userEventMsg{Type: "user_joined", Username: name}))
+			p.sendWS(mustMarshal(roomEventMsg{Type: "room_event", Kind: "joined", Username: name}))
 		},
 		OnUserLeft: func(mc *mumble.Client, name string) {
 			p.sendWS(mustMarshal(userEventMsg{Type: "user_left", Username: name}))
+			p.sendWS(mustMarshal(roomEventMsg{Type: "room_event", Kind: "left", Username: name}))
 		},
 		OnUserMoved: func(mc *mumble.Client) {
-			p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: mc.SelfChannelUsers()}))
+			p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: toUserInfos(mc.SelfChannelUsers())}))
+		},
+		OnUserMuteChanged: func(mc *mumble.Client, name string, muted, selfMuted bool) {
+			p.sendWS(mustMarshal(muteStateMsg{
+				Type: "mute_state", Username: name, Muted: muted, SelfMuted: selfMuted,
+			}))
+			kind := "unmuted"
+			if muted || selfMuted {
+				kind = "muted"
+			}
+			p.sendWS(mustMarshal(roomEventMsg{Type: "room_event", Kind: kind, Username: name}))
+		},
+		OnUserDeafChanged: func(mc *mumble.Client, name string, deafened, selfDeafened bool) {
+			p.sendWS(mustMarshal(deafStateMsg{
+				Type: "deaf_state", Username: name, Deafened: deafened, SelfDeafened: selfDeafened,
+			}))
+			kind := "undeafened"
+			if deafened || selfDeafened {
+				kind = "deafened"
+			}
+			p.sendWS(mustMarshal(roomEventMsg{Type: "room_event", Kind: kind, Username: name}))
 		},
 		OnAudio: func(mc *mumble.Client, session uint32, seq int64, final bool, opus []byte) {
 			p.handleMumbleAudio(session, opus)
+			p.markTalking(mc, session)
 		},
 	}
 
@@ -344,6 +391,21 @@ func (p *Peer) handleICE(m iceMsg) error {
 	})
 }
 
+// toUserInfos converts mumble roster snapshots to their wire representation.
+func toUserInfos(statuses []mumble.UserStatus) []userInfo {
+	infos := make([]userInfo, len(statuses))
+	for i, s := range statuses {
+		infos[i] = userInfo{
+			Name:         s.Name,
+			Muted:        s.Muted,
+			SelfMuted:    s.SelfMuted,
+			Deafened:     s.Deafened,
+			SelfDeafened: s.SelfDeafened,
+		}
+	}
+	return infos
+}
+
 func (p *Peer) handleText(message string) {
 	if p.mumble == nil {
 		return
@@ -383,6 +445,26 @@ func (p *Peer) handleMumbleAudio(session uint32, opus []byte) {
 		Duration: opusFrameDuration(opus),
 	}); err != nil {
 		log.Printf("peer %s: write remote sample: %v", p.id, err)
+	}
+}
+
+// markTalking records that session just sent an audio packet, notifying the
+// browser of a talking-start transition the first time a session appears.
+// Clearing back to not-talking happens on a timeout in reapSlots, since
+// Mumble doesn't reliably signal end-of-talk-spurt.
+func (p *Peer) markTalking(mc *mumble.Client, session uint32) {
+	name := mc.UserName(session)
+	if name == "" {
+		return
+	}
+
+	p.talkMu.Lock()
+	_, wasTalking := p.talking[session]
+	p.talking[session] = talkEntry{name: name, lastActive: time.Now()}
+	p.talkMu.Unlock()
+
+	if !wasTalking {
+		p.sendWS(mustMarshal(talkingMsg{Type: "talking", Username: name, Talking: true}))
 	}
 }
 
@@ -444,6 +526,19 @@ func (p *Peer) reapSlots() {
 				}
 			}
 			p.slotsMu.Unlock()
+
+			p.talkMu.Lock()
+			var stopped []string
+			for session, entry := range p.talking {
+				if now.Sub(entry.lastActive) > talkIdleTimeout {
+					stopped = append(stopped, entry.name)
+					delete(p.talking, session)
+				}
+			}
+			p.talkMu.Unlock()
+			for _, name := range stopped {
+				p.sendWS(mustMarshal(talkingMsg{Type: "talking", Username: name, Talking: false}))
+			}
 		}
 	}
 }
@@ -492,7 +587,7 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 // before handleLogin's call to mumble.Dial has returned, so it must use mc
 // rather than p.mumble (see the comment on cfg in handleLogin).
 func (p *Peer) onMumbleConnect(mc *mumble.Client, welcome string) {
-	p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: mc.SelfChannelUsers()}))
+	p.sendWS(mustMarshal(userListMsg{Type: "user_list", Users: toUserInfos(mc.SelfChannelUsers())}))
 	if welcome != "" {
 		p.sendWS(mustMarshal(textMsg{Type: "text", From: "", Message: welcome}))
 	}
