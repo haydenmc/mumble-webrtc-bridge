@@ -48,7 +48,10 @@ const USERS_SLASH_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="23" y1="11" y2="11"/></svg>'
 
 // --- Per-user avatar color (stable hash → palette; reused for chat .from) ---
-const AVATAR_COLORS = ['#5b8def', '#e08948', '#34d399', '#a06be0', '#e0567a', '#4bbfd0']
+const AVATAR_COLORS = [
+  '#5b8def', '#e08948', '#34d399', '#a06be0', '#e0567a', '#4bbfd0',
+  '#d9a441', '#6d7ee0', '#7dc15a', '#d066c4', '#3fb0a0', '#e08267',
+]
 function colorFor(name: string): string {
   let h = 0
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0
