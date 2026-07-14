@@ -58,19 +58,10 @@ class LoudnessProcessor extends AudioWorkletProcessor {
 registerProcessor('loudness-processor', LoudnessProcessor)
 `
 
-// applyOpusOptions appends constant-bitrate parameters to the opus fmtp
-// line(s) in an SDP offer before it's sent, at a user-configurable bitrate.
-// Diagnostic/mitigation for a suspected cause of intermittent garbled audio:
-// WebRTC's opus encoder adaptively switches CELT bandwidth (SWB <-> FB)
-// mid-stream, and each switch resets CELT's internal MDCT/overlap-add state,
-// which can produce an audible glitch right at the switch. cbr=1 alone only
-// pins bitrate, not bandwidth mode — libopus's automatic bandwidth selection
-// is bitrate-dependent, and 64kbps sits close enough to the SWB/FB decision
-// boundary that per-frame complexity variation can still tip it either way.
-// Pushing the bitrate well clear of that boundary should stabilize the
-// bandwidth choice.
-// Applies to every m= section's opus fmtp line rather than just the mic's;
-// the extra ones are on recvonly transceivers that never send anything, so
+// applyOpusOptions rewrites the opus fmtp line(s) in an SDP offer before
+// it's sent, pinning constant bitrate at the user-configured value. Applies
+// to every m= section's opus fmtp line rather than just the mic's; the
+// extra ones are on recvonly transceivers that never send anything, so
 // it's a no-op there, not worth the complexity of targeting only the mic's
 // line.
 //
