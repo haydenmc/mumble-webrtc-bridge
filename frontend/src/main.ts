@@ -1,4 +1,4 @@
-import { MumbleWebRTCClient, type RoomEventKind, type UserInfo } from './client'
+import { MumbleWebRTCClient, type NoiseSuppressionMode, type RoomEventKind, type UserInfo } from './client'
 
 // --- DOM refs ---
 const viewLogin = document.getElementById('view-login')!
@@ -8,7 +8,9 @@ const usernameInput = document.getElementById('username') as HTMLInputElement
 const passwordInput = document.getElementById('password') as HTMLInputElement
 const bitrateSelect = document.getElementById('bitrate-select') as HTMLSelectElement
 const lowDelayToggle = document.getElementById('low-delay-toggle') as HTMLInputElement
-const noiseSuppressionToggle = document.getElementById('noise-suppression-toggle') as HTMLInputElement
+const autoGainToggle = document.getElementById('auto-gain-toggle') as HTMLInputElement
+const echoCancellationToggle = document.getElementById('echo-cancellation-toggle') as HTMLInputElement
+const noiseSuppressionSelect = document.getElementById('noise-suppression-select') as HTMLSelectElement
 const loginError = document.getElementById('login-error')!
 const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement
 const muteBtn = document.getElementById('mute-btn') as HTMLButtonElement
@@ -23,7 +25,13 @@ let muted = false
 let currentUsername = ''
 
 // --- Client setup ---
-function createClient(bitrateBps: number, lowDelay: boolean, noiseSuppression: boolean): MumbleWebRTCClient {
+function createClient(
+  bitrateBps: number,
+  lowDelay: boolean,
+  noiseSuppressionMode: NoiseSuppressionMode,
+  autoGainControl: boolean,
+  echoCancellation: boolean,
+): MumbleWebRTCClient {
   return new MumbleWebRTCClient(
     {
       onConnected() {
@@ -68,7 +76,9 @@ function createClient(bitrateBps: number, lowDelay: boolean, noiseSuppression: b
     '',
     bitrateBps,
     lowDelay,
-    noiseSuppression,
+    noiseSuppressionMode,
+    autoGainControl,
+    echoCancellation,
   )
 }
 
@@ -97,23 +107,35 @@ loadCredentials()
 const ADVANCED_OPTIONS_STORAGE_KEY = 'mumble-bridge-advanced-options'
 const DEFAULT_BITRATE_BPS = 96000
 
+const VALID_NOISE_SUPPRESSION_MODES: NoiseSuppressionMode[] = ['rnnoise', 'browser', 'off']
+
 function loadAdvancedOptions(): void {
   try {
     const saved = localStorage.getItem(ADVANCED_OPTIONS_STORAGE_KEY)
     if (!saved) return
-    const { bitrateBps, lowDelay, noiseSuppression } = JSON.parse(saved)
+    const { bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode } = JSON.parse(saved)
     if (bitrateBps) bitrateSelect.value = String(bitrateBps)
     if (lowDelay !== undefined) lowDelayToggle.checked = Boolean(lowDelay)
-    if (noiseSuppression !== undefined) noiseSuppressionToggle.checked = Boolean(noiseSuppression)
+    if (autoGainControl !== undefined) autoGainToggle.checked = Boolean(autoGainControl)
+    if (echoCancellation !== undefined) echoCancellationToggle.checked = Boolean(echoCancellation)
+    if (VALID_NOISE_SUPPRESSION_MODES.includes(noiseSuppressionMode)) {
+      noiseSuppressionSelect.value = noiseSuppressionMode
+    }
   } catch {
     // ignore malformed storage
   }
 }
 
-function saveAdvancedOptions(bitrateBps: number, lowDelay: boolean, noiseSuppression: boolean): void {
+function saveAdvancedOptions(
+  bitrateBps: number,
+  lowDelay: boolean,
+  autoGainControl: boolean,
+  echoCancellation: boolean,
+  noiseSuppressionMode: NoiseSuppressionMode,
+): void {
   localStorage.setItem(
     ADVANCED_OPTIONS_STORAGE_KEY,
-    JSON.stringify({ bitrateBps, lowDelay, noiseSuppression }),
+    JSON.stringify({ bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode }),
   )
 }
 
@@ -128,16 +150,18 @@ loginForm.addEventListener('submit', (e) => {
 
   const bitrateBps = parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS
   const lowDelay = lowDelayToggle.checked
-  const noiseSuppression = noiseSuppressionToggle.checked
+  const autoGainControl = autoGainToggle.checked
+  const echoCancellation = echoCancellationToggle.checked
+  const noiseSuppressionMode = noiseSuppressionSelect.value as NoiseSuppressionMode
 
   saveCredentials(username, password)
-  saveAdvancedOptions(bitrateBps, lowDelay, noiseSuppression)
+  saveAdvancedOptions(bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode)
   loginError.classList.add('hidden')
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
 
   currentUsername = username
-  client = createClient(bitrateBps, lowDelay, noiseSuppression)
+  client = createClient(bitrateBps, lowDelay, noiseSuppressionMode, autoGainControl, echoCancellation)
   client.connect(username, password)
 })
 

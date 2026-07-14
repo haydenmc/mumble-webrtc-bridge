@@ -34,9 +34,19 @@
             Low delay mode
           </label>
           <label class="checkbox-label">
-            <input type="checkbox" id="noise-suppression-toggle" checked />
-            Noise suppression (RNNoise)
+            <input type="checkbox" id="auto-gain-toggle" checked />
+            Auto gain control
           </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="echo-cancellation-toggle" checked />
+            Echo cancellation
+          </label>
+          <label for="noise-suppression-select">Noise suppression</label>
+          <select id="noise-suppression-select">
+            <option value="rnnoise" selected>RNNoise</option>
+            <option value="browser">Browser</option>
+            <option value="off">Disabled</option>
+          </select>
         </details>
         <button type="submit" id="connect-btn">Connect</button>
       </form>

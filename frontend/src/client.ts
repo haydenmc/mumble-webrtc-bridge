@@ -128,6 +128,8 @@ export interface UserInfo {
 
 export type RoomEventKind = 'joined' | 'left' | 'muted' | 'unmuted' | 'deafened' | 'undeafened'
 
+export type NoiseSuppressionMode = 'rnnoise' | 'browser' | 'off'
+
 export type ServerMsg =
   | { type: 'connected' }
   | { type: 'error'; message: string }
@@ -188,7 +190,9 @@ export class MumbleWebRTCClient {
     private turnCredential: string = '',
     private opusBitrateBps: number = 96000,
     private opusLowDelay: boolean = true,
-    private rnnoiseEnabled: boolean = true,
+    private noiseSuppressionMode: NoiseSuppressionMode = 'rnnoise',
+    private autoGainControl: boolean = true,
+    private echoCancellation: boolean = true,
   ) {}
 
   connect(username: string, password: string): void {
@@ -345,14 +349,12 @@ export class MumbleWebRTCClient {
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      // Disable the browser's own noise suppression when RNNoise is on —
-      // stacking two suppressors introduces musical-noise artifacts. Echo
-      // cancellation and auto gain stay on regardless: RNNoise does neither,
-      // and AGC's normalized input level is what RNNoise was trained on.
+      // Only ask the browser for noise suppression in 'browser' mode —
+      // stacking it with RNNoise introduces musical-noise artifacts.
       audio: {
-        noiseSuppression: !this.rnnoiseEnabled,
-        echoCancellation: true,
-        autoGainControl: true,
+        noiseSuppression: this.noiseSuppressionMode === 'browser',
+        echoCancellation: this.echoCancellation,
+        autoGainControl: this.autoGainControl,
       },
       video: false,
     })
@@ -379,7 +381,7 @@ export class MumbleWebRTCClient {
     let sendTrack = micTrack
     let sendStream = stream
     let loudnessTap: AudioNode = micSource
-    if (this.rnnoiseEnabled) {
+    if (this.noiseSuppressionMode === 'rnnoise') {
       try {
         await this.audioCtx.audioWorklet.addModule(NoiseSuppressorWorkletUrl)
         // Force mono I/O. The worklet only ever writes channel 0 of its
