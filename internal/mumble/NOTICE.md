@@ -3,13 +3,21 @@ project. It is not a fork of any single upstream library, but it
 incorporates a few pieces of code taken from existing open-source Mumble
 implementations rather than reimplemented from scratch, credited below.
 
-## `MumbleProto/Mumble.pb.go`, `varint/`
+## `MumbleProto/Mumble.proto`
+
+Vendored from [mumble-voip/mumble](https://github.com/mumble-voip/mumble)
+`src/Mumble.proto`, pinned at tag `v1.5.901` (commit
+`b26165ed56a08566daf3e1a6eb80df081284b4d9`), licensed under a
+BSD-3-Clause-style license. See `LICENSE-BSD-mumble`. `MumbleProto/Mumble.pb.go`
+is generated from this file at build time (see the Dockerfile and `make
+generate-proto`) and is not committed to the repository.
+
+## `varint/`
 
 Copied verbatim from [layeh.com/gumble](https://github.com/layeh/gumble)
 (commit `d1df60a3cc14`), licensed under the Mozilla Public License 2.0. See
-`LICENSE-MPL-2.0`. `MumbleProto/Mumble.pb.go` is protoc-generated code for
-Mumble's public `Mumble.proto` wire format; `varint/` is Mumble's
-variable-length integer codec used in the audio packet framing.
+`LICENSE-MPL-2.0`. Mumble's variable-length integer codec used in the audio
+packet framing.
 
 ## `cryptstate/`
 

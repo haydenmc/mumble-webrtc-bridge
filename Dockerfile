@@ -15,11 +15,20 @@ RUN npm run build
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
-RUN apk add --no-cache ca-certificates
+# protobuf-dev provides protoc; protoc-gen-go is pinned to match the
+# google.golang.org/protobuf version in go.mod (keep in sync with the
+# "generate-proto" Makefile target, which uses the same version).
+RUN apk add --no-cache ca-certificates protobuf-dev
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+ENV PATH="/root/go/bin:${PATH}"
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# Mumble.pb.go is generated here, not committed, from the vendored
+# Mumble.proto (see internal/mumble/MumbleProto/Mumble.proto and NOTICE.md).
+RUN protoc --go_out=. --go_opt=paths=source_relative \
+    internal/mumble/MumbleProto/Mumble.proto
 COPY --from=frontend /app/frontend/dist ./frontend/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o bridge-server .
 

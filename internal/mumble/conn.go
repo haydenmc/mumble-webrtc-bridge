@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/MumbleProto"
+	"google.golang.org/protobuf/proto"
 )
 
 // Packet type IDs, per the Mumble control-channel protocol. Only the types

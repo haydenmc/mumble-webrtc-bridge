@@ -5,10 +5,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/MumbleProto"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/cryptstate"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble/varint"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
