@@ -1,3 +1,6 @@
+import { NoiseSuppressorWorklet_Name } from '@timephy/rnnoise-wasm'
+import NoiseSuppressorWorkletUrl from '@timephy/rnnoise-wasm/NoiseSuppressorWorklet?worker&url'
+
 // Must match remoteTrackSlots in bridge/peer.go: the bridge pre-negotiates
 // this many outbound tracks, one per potential simultaneous Mumble speaker,
 // and dynamically relays whichever sessions are talking onto them.
@@ -165,6 +168,11 @@ export class MumbleWebRTCClient {
   private remoteAudioEls = new Map<string, HTMLAudioElement>()
   private manuallyMuted = false
   private micTrack: MediaStreamTrack | null = null
+  // The unprocessed hardware capture track, kept separately so cleanup() can
+  // stop it: when RNNoise is on, micTrack is the *processed* destination
+  // track, whose stop() does not release the microphone.
+  private rawMicTrack: MediaStreamTrack | null = null
+  private rnnoiseNode: AudioWorkletNode | null = null
   private audioSender: RTCRtpSender | null = null
   private audioCtx: AudioContext | null = null
   private loudnessNode: AudioWorkletNode | null = null
@@ -180,6 +188,7 @@ export class MumbleWebRTCClient {
     private turnCredential: string = '',
     private opusBitrateBps: number = 96000,
     private opusLowDelay: boolean = true,
+    private rnnoiseEnabled: boolean = true,
   ) {}
 
   connect(username: string, password: string): void {
@@ -336,11 +345,58 @@ export class MumbleWebRTCClient {
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      // Disable the browser's own noise suppression when RNNoise is on —
+      // stacking two suppressors introduces musical-noise artifacts. Echo
+      // cancellation and auto gain stay on regardless: RNNoise does neither,
+      // and AGC's normalized input level is what RNNoise was trained on.
+      audio: {
+        noiseSuppression: !this.rnnoiseEnabled,
+        echoCancellation: true,
+        autoGainControl: true,
+      },
       video: false,
     })
     const [micTrack] = stream.getAudioTracks()
-    this.micTrack = micTrack
+    this.rawMicTrack = micTrack
+
+    // Pinned to 48kHz: RNNoise processes 480-sample frames at exactly 48kHz
+    // and the worklet does not resample, so a 44.1kHz context (the macOS
+    // default) would produce garbled output. The browser resamples the mic
+    // to the context rate transparently, and Opus is 48kHz downstream
+    // anyway. Created before addTransceiver because the processed send track
+    // must exist before the transceiver is built.
+    this.audioCtx = new AudioContext({ sampleRate: 48000 })
+    // A suspended context would emit a silent outgoing track (not just a
+    // dead loudness gate). connect() runs from a user-gesture submit handler
+    // so the context should already start running; this is cheap insurance.
+    void this.audioCtx.resume()
+    const micSource = this.audioCtx.createMediaStreamSource(stream)
+
+    // Route the mic through RNNoise into a MediaStreamAudioDestinationNode
+    // and send that destination's track. Adds ~13-16ms latency (10ms RNNoise
+    // frame buffering plus a render quantum or two). On any failure, fall
+    // back to sending the raw mic track unprocessed.
+    let sendTrack = micTrack
+    let sendStream = stream
+    let loudnessTap: AudioNode = micSource
+    if (this.rnnoiseEnabled) {
+      try {
+        await this.audioCtx.audioWorklet.addModule(NoiseSuppressorWorkletUrl)
+        this.rnnoiseNode = new AudioWorkletNode(this.audioCtx, NoiseSuppressorWorklet_Name)
+        const dest = this.audioCtx.createMediaStreamDestination()
+        micSource.connect(this.rnnoiseNode)
+        this.rnnoiseNode.connect(dest)
+        sendStream = dest.stream
+        ;[sendTrack] = dest.stream.getAudioTracks()
+        // Gate on the denoised signal so steady background noise (fans,
+        // typing) no longer holds the transmit gate open.
+        loudnessTap = this.rnnoiseNode
+      } catch (err) {
+        this.rnnoiseNode = null
+        console.warn('RNNoise unavailable, sending raw mic audio', err)
+      }
+    }
+    this.micTrack = sendTrack
 
     // addTransceiver (not addTrack) so the mic always gets its own new m=
     // section. addTrack's spec behavior is to *reuse* an existing
@@ -348,16 +404,15 @@ export class MumbleWebRTCClient {
     // silently claim one of the REMOTE_SLOTS recvonly transceivers created
     // above instead of getting a dedicated line, throwing off the 1:1
     // mapping the bridge's track pool assumes.
-    const transceiver = this.pc.addTransceiver(micTrack, { direction: 'sendrecv', streams: [stream] })
+    const transceiver = this.pc.addTransceiver(sendTrack, { direction: 'sendrecv', streams: [sendStream] })
     this.audioSender = transceiver.sender
 
-    // Loudness gate: an AudioWorkletNode tapping `stream` directly,
+    // Loudness gate: an AudioWorkletNode tapping the send-path signal
+    // (RNNoise output when enabled, otherwise the raw mic source),
     // independent of whatever the RTP sender currently references — see
     // LOUDNESS_WORKLET_SOURCE for why a worklet instead of a poll. Starts
     // silent, like Mumble's voice-activation mode, until the first loud
     // window.
-    this.audioCtx = new AudioContext()
-    const micSource = this.audioCtx.createMediaStreamSource(stream)
     const workletURL = URL.createObjectURL(
       new Blob([LOUDNESS_WORKLET_SOURCE], { type: 'application/javascript' }),
     )
@@ -367,7 +422,7 @@ export class MumbleWebRTCClient {
       URL.revokeObjectURL(workletURL)
     }
     this.loudnessNode = new AudioWorkletNode(this.audioCtx, 'loudness-processor')
-    micSource.connect(this.loudnessNode)
+    loudnessTap.connect(this.loudnessNode)
     this.loudnessNode.port.onmessage = (evt: MessageEvent<number>) => {
       const rms = evt.data
       if (rms >= LOUDNESS_THRESHOLD) {
@@ -454,10 +509,16 @@ export class MumbleWebRTCClient {
     this.loudnessNode?.port.close()
     this.loudnessNode?.disconnect()
     this.loudnessNode = null
+    this.rnnoiseNode?.disconnect()
+    this.rnnoiseNode = null
     void this.audioCtx?.close()
     this.audioCtx = null
     this.micTrack?.stop()
     this.micTrack = null
+    // Separate from micTrack — when RNNoise is on, micTrack is the processed
+    // track and only stopping rawMicTrack releases the hardware mic.
+    this.rawMicTrack?.stop()
+    this.rawMicTrack = null
     this.pc?.close()
     this.pc = null
     this.ws?.close()
