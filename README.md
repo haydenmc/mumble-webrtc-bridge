@@ -84,3 +84,14 @@ internal/mumble/        Mumble protocol client (TCP control + UDP voice)
 frontend/               TypeScript/Vite single-page app
 Dockerfile               Multi-stage podman build (frontend -> Go -> runtime)
 ```
+
+## Sound effect attribution
+
+The notification sounds in `frontend/public/sounds/` (join/leave/message/mute/
+deafen, toggleable from Advanced options) are sourced from Pixabay:
+
+- `join.ogg`: [Film Special Effects Notification 1](https://pixabay.com/sound-effects/film-special-effects-notification-1-269296/)
+- `leave.ogg`: [Film Special Effects Notification 1 (reversed)](https://pixabay.com/sound-effects/film-special-effects-notification-1-reversed-317859/)
+- `message.ogg`: [App Interface Click 2](https://pixabay.com/sound-effects/app-interface-click-2-476372/)
+- `mute.ogg`, `deafen.ogg`: [Film Special Effects UI Sound Off](https://pixabay.com/sound-effects/film-special-effects-ui-sound-off-270300/)
+- `unmute.ogg`, `undeafen.ogg`: [Film Special Effects UI Sound On](https://pixabay.com/sound-effects/film-special-effects-ui-sound-on-270295/)

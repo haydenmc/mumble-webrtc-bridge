@@ -1,4 +1,5 @@
 import { MumbleWebRTCClient, type NoiseSuppressionMode, type RoomEventKind, type UserInfo } from './client'
+import { playSound, setSoundsEnabled } from './sounds'
 
 // --- DOM refs ---
 const viewLogin = document.getElementById('view-login')!
@@ -6,6 +7,7 @@ const viewRoom = document.getElementById('view-room')!
 const loginForm = document.getElementById('login-form') as HTMLFormElement
 const usernameInput = document.getElementById('username') as HTMLInputElement
 const passwordInput = document.getElementById('password') as HTMLInputElement
+const soundsToggle = document.getElementById('sounds-toggle') as HTMLInputElement
 const bitrateSelect = document.getElementById('bitrate-select') as HTMLSelectElement
 const lowDelayToggle = document.getElementById('low-delay-toggle') as HTMLInputElement
 const autoGainToggle = document.getElementById('auto-gain-toggle') as HTMLInputElement
@@ -74,6 +76,7 @@ function createClient(
   return new MumbleWebRTCClient(
     {
       onConnected() {
+        playSound('join')
         showRoom()
       },
       onError(msg) {
@@ -82,15 +85,18 @@ function createClient(
         connectBtn.textContent = 'Connect'
       },
       onText(from, message) {
+        if (from) playSound('message')
         appendMessage(from, message)
       },
       onUserList(users) {
         setUserList(users)
       },
       onUserJoined(username) {
+        playSound('join')
         addUser({ name: username, muted: false, selfMuted: false, deafened: false, selfDeafened: false })
       },
       onUserLeft(username) {
+        playSound('leave')
         removeUser(username)
       },
       onMuteState(username, muted, selfMuted) {
@@ -106,6 +112,10 @@ function createClient(
         appendRoomEvent(kind, username)
       },
       onDisconnected() {
+        // Only a genuine post-connect disconnect counts as "leaving" — a
+        // failed login attempt closes the socket too, but never showed the
+        // room view, so it shouldn't play the leave sound.
+        if (!viewRoom.classList.contains('hidden')) playSound('leave')
         showLogin()
       },
     },
@@ -152,7 +162,8 @@ function loadAdvancedOptions(): void {
   try {
     const saved = localStorage.getItem(ADVANCED_OPTIONS_STORAGE_KEY)
     if (!saved) return
-    const { bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode } = JSON.parse(saved)
+    const { bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled } =
+      JSON.parse(saved)
     if (bitrateBps) bitrateSelect.value = String(bitrateBps)
     if (lowDelay !== undefined) lowDelayToggle.checked = Boolean(lowDelay)
     if (autoGainControl !== undefined) autoGainToggle.checked = Boolean(autoGainControl)
@@ -160,9 +171,11 @@ function loadAdvancedOptions(): void {
     if (VALID_NOISE_SUPPRESSION_MODES.includes(noiseSuppressionMode)) {
       noiseSuppressionSelect.value = noiseSuppressionMode
     }
+    if (soundsEnabled !== undefined) soundsToggle.checked = Boolean(soundsEnabled)
   } catch {
     // ignore malformed storage
   }
+  setSoundsEnabled(soundsToggle.checked)
 }
 
 function saveAdvancedOptions(
@@ -171,14 +184,27 @@ function saveAdvancedOptions(
   autoGainControl: boolean,
   echoCancellation: boolean,
   noiseSuppressionMode: NoiseSuppressionMode,
+  soundsEnabled: boolean,
 ): void {
   localStorage.setItem(
     ADVANCED_OPTIONS_STORAGE_KEY,
-    JSON.stringify({ bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode }),
+    JSON.stringify({ bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled }),
   )
 }
 
 loadAdvancedOptions()
+
+soundsToggle.addEventListener('change', () => {
+  setSoundsEnabled(soundsToggle.checked)
+  saveAdvancedOptions(
+    parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS,
+    lowDelayToggle.checked,
+    autoGainToggle.checked,
+    echoCancellationToggle.checked,
+    noiseSuppressionSelect.value as NoiseSuppressionMode,
+    soundsToggle.checked,
+  )
+})
 
 // --- Login ---
 loginForm.addEventListener('submit', (e) => {
@@ -194,7 +220,7 @@ loginForm.addEventListener('submit', (e) => {
   const noiseSuppressionMode = noiseSuppressionSelect.value as NoiseSuppressionMode
 
   saveCredentials(username, password)
-  saveAdvancedOptions(bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode)
+  saveAdvancedOptions(bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsToggle.checked)
   loginError.classList.add('hidden')
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
@@ -212,6 +238,7 @@ function renderMuteButton(): void {
 }
 
 function applyMute(next: boolean): void {
+  if (next !== muted) playSound(next ? 'mute' : 'unmute')
   muted = next
   client?.setMuted(muted)
   renderMuteButton()
@@ -228,6 +255,7 @@ function renderDeafenButton(): void {
 
 deafenBtn.addEventListener('click', () => {
   deafened = !deafened
+  playSound(deafened ? 'deafen' : 'undeafen')
   client?.setDeafened(deafened) // also mutes remote audio + forces client mute
   renderDeafenButton()
   // Reflect the forced mute in the UI without re-sending the mute message
