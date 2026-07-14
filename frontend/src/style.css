@@ -1,10 +1,9 @@
 /* =====================================================================
-   WarmItUp Mumble — polished UI
-   Drop-in replacement for frontend/src/style.css
-   Targets the existing DOM contract in index.html + main.ts. New hooks
-   introduced by this redesign (documented in README.md) are:
-     .user-avatar, .talking-bars, #deafen-btn,
-     .chat-sheet(.open), .sheet-toggle, .sheet-latest, .empty-state
+   Styles for the browser client — a dark navy/coral theme built on the
+   design tokens in :root (colors, radii). Two views: a centered login
+   card and the room (sidebar roster + chat panel). Responsive down to a
+   mobile layout (<= 640px) where the roster stays visible and chat
+   collapses into a bottom sheet.
    ===================================================================== */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
