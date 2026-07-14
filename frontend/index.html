@@ -7,9 +7,14 @@
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
+  <!-- Reusable mic glyph is inlined where needed (login brand-mark, sidebar). -->
+
   <!-- Login view -->
   <div id="view-login" class="view">
     <div class="card">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+      </div>
       <h1>{{.Title}}</h1>
       {{if .About}}<p class="about">{{.About}}</p>{{end}}
       <form id="login-form">
@@ -57,19 +62,60 @@
   <div id="view-room" class="view hidden">
     <div class="room-layout">
       <aside class="sidebar">
-        <h1 class="sidebar-title">{{.Title}}</h1>
-        <h2>Users</h2>
+        <div class="sidebar-header">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+          </div>
+          <div style="min-width:0">
+            <h1 class="sidebar-title">{{.Title}}</h1>
+            <div class="conn-status">Connected</div>
+          </div>
+          <!-- mobile-only disconnect (CSS hides the sidebar .btn-disconnect on mobile) -->
+          <button id="disconnect-btn-mobile" class="btn-disconnect" title="Disconnect">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="17" height="17"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+          </button>
+        </div>
+
+        <h2>Users <span class="user-count" id="user-count">0</span></h2>
+        <!-- main.ts populates #user-list; renders .empty-state inside when empty -->
         <ul id="user-list"></ul>
+
         <div class="controls">
-          <button id="mute-btn" class="btn-mute">Mute</button>
-          <button id="disconnect-btn" class="btn-disconnect">Disconnect</button>
+          <div class="controls-row">
+            <button id="mute-btn" class="btn-mute">
+              <span class="btn-icon"><!-- JS swaps mic / mic-off svg --></span>
+              <span class="btn-label">Mute</span>
+            </button>
+            <button id="deafen-btn" class="btn-deafen">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 18 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/></svg>
+              <span class="btn-label">Deafen</span>
+            </button>
+          </div>
+          <button id="disconnect-btn" class="btn-disconnect">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+            Disconnect
+          </button>
         </div>
       </aside>
-      <main class="chat-panel">
+
+      <!-- On desktop this is the right-hand panel. On mobile CSS turns it into
+           a bottom sheet; toggle .open via the .sheet-toggle handler. -->
+      <main class="chat-panel chat-sheet">
+        <button type="button" class="sheet-toggle" id="sheet-toggle" aria-expanded="false">
+          <div class="sheet-head">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#8b94b0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
+            <span class="sheet-title">Chat</span>
+            <span class="sheet-latest" id="sheet-latest"></span>
+            <svg class="sheet-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><polyline points="18 15 12 9 6 15"/></svg>
+          </div>
+        </button>
         <div id="chat-messages"></div>
         <form id="chat-form">
           <input id="chat-input" type="text" placeholder="Type a message…" autocomplete="off" />
-          <button type="submit">Send</button>
+          <button type="submit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+            <span>Send</span>
+          </button>
         </form>
       </main>
     </div>

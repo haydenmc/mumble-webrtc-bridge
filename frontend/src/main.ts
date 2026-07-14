@@ -14,15 +14,54 @@ const noiseSuppressionSelect = document.getElementById('noise-suppression-select
 const loginError = document.getElementById('login-error')!
 const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement
 const muteBtn = document.getElementById('mute-btn') as HTMLButtonElement
+const muteBtnIcon = muteBtn.querySelector('.btn-icon') as HTMLSpanElement
+const muteBtnLabel = muteBtn.querySelector('.btn-label') as HTMLSpanElement
+const deafenBtn = document.getElementById('deafen-btn') as HTMLButtonElement
+const deafenBtnLabel = deafenBtn.querySelector('.btn-label') as HTMLSpanElement
 const disconnectBtn = document.getElementById('disconnect-btn') as HTMLButtonElement
+const disconnectBtnMobile = document.getElementById('disconnect-btn-mobile') as HTMLButtonElement
 const userList = document.getElementById('user-list')!
+const userCount = document.getElementById('user-count')!
 const chatMessages = document.getElementById('chat-messages')!
 const chatForm = document.getElementById('chat-form') as HTMLFormElement
 const chatInput = document.getElementById('chat-input') as HTMLInputElement
+const chatPanel = document.querySelector('.chat-panel') as HTMLElement
+const sheetToggle = document.getElementById('sheet-toggle')!
+const sheetLatest = document.getElementById('sheet-latest')!
 
 let client: MumbleWebRTCClient | null = null
 let muted = false
+let deafened = false
 let currentUsername = ''
+
+// --- Inline SVG icons (stroke inherits currentColor / CSS) ---
+const MIC_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
+const MIC_OFF_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
+// User-list status glyphs — stroke color comes from CSS (.icon-muted / .icon-deafened).
+const USER_MIC_OFF_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
+const USER_DEAF_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><line x1="2" x2="22" y1="2" y2="22"/><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 13.4-7.83"/><path d="M20.6 8.4A9 9 0 0 1 21 12v5.5"/><path d="M18 21a2 2 0 0 1-2-2v-3"/></svg>'
+const USERS_SLASH_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="23" y1="11" y2="11"/></svg>'
+
+// --- Per-user avatar color (stable hash → palette; reused for chat .from) ---
+// 32 colors, generated once so large rooms rarely repeat. Hues are spread
+// evenly around the wheel; lightness dips through the high-luminance
+// yellow/green/cyan band (min ~hue 100) and rises for the dark blues/violets
+// (max ~hue 280) so the white avatar initial stays legible on every swatch.
+const AVATAR_COLORS = Array.from({ length: 32 }, (_, i) => {
+  const hue = (i * 360) / 32
+  const light = 51 + 13 * Math.cos(((hue - 280) * Math.PI) / 180)
+  return `hsl(${hue.toFixed(0)}, 60%, ${light.toFixed(0)}%)`
+})
+function colorFor(name: string): string {
+  let h = 0
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0
+  return AVATAR_COLORS[h % AVATAR_COLORS.length]
+}
 
 // --- Client setup ---
 function createClient(
@@ -166,11 +205,37 @@ loginForm.addEventListener('submit', (e) => {
 })
 
 // --- Mute ---
-muteBtn.addEventListener('click', () => {
-  muted = !muted
-  client?.setMuted(muted)
-  muteBtn.textContent = muted ? 'Unmute' : 'Mute'
+function renderMuteButton(): void {
+  muteBtnIcon.innerHTML = muted ? MIC_OFF_SVG : MIC_SVG
+  muteBtnLabel.textContent = muted ? 'Unmute' : 'Mute'
   muteBtn.classList.toggle('active', muted)
+}
+
+function applyMute(next: boolean): void {
+  muted = next
+  client?.setMuted(muted)
+  renderMuteButton()
+}
+
+renderMuteButton()
+muteBtn.addEventListener('click', () => applyMute(!muted))
+
+// --- Deafen (local only: silences remote playback + forces mute) ---
+function renderDeafenButton(): void {
+  deafenBtnLabel.textContent = deafened ? 'Undeafen' : 'Deafen'
+  deafenBtn.classList.toggle('active', deafened)
+}
+
+deafenBtn.addEventListener('click', () => {
+  deafened = !deafened
+  client?.setDeafened(deafened) // also mutes remote audio + forces client mute
+  renderDeafenButton()
+  // Reflect the forced mute in the UI without re-sending the mute message
+  // (client.setDeafened already muted us server-side).
+  if (deafened && !muted) {
+    muted = true
+    renderMuteButton()
+  }
 })
 
 // --- Disconnect ---
@@ -178,6 +243,17 @@ disconnectBtn.addEventListener('click', () => {
   client?.disconnect()
   client = null
 })
+disconnectBtnMobile.addEventListener('click', () => disconnectBtn.click())
+
+// --- Mobile chat sheet ---
+sheetToggle.addEventListener('click', () => {
+  const open = chatPanel.classList.toggle('open')
+  sheetToggle.setAttribute('aria-expanded', String(open))
+})
+
+function setSheetLatest(text: string): void {
+  sheetLatest.textContent = text
+}
 
 // --- Chat ---
 chatForm.addEventListener('submit', (e) => {
@@ -196,17 +272,24 @@ function showLogin(): void {
   connectBtn.disabled = false
   connectBtn.textContent = 'Connect'
   muted = false
+  deafened = false
   currentUsername = ''
-  muteBtn.textContent = 'Mute'
-  muteBtn.classList.remove('active')
+  renderMuteButton()
+  renderDeafenButton()
+  chatPanel.classList.remove('open')
+  sheetToggle.setAttribute('aria-expanded', 'false')
+  setSheetLatest('')
   userList.innerHTML = ''
   chatMessages.innerHTML = ''
+  refreshRoster()
 }
 
 function showRoom(): void {
   loginError.classList.add('hidden')
   viewLogin.classList.add('hidden')
   viewRoom.classList.remove('hidden')
+  // Render the empty state / count immediately in case no roster arrives yet.
+  refreshRoster()
 }
 
 function showLoginError(msg: string): void {
@@ -221,36 +304,85 @@ function setUserList(users: UserInfo[]): void {
   for (const user of users) {
     addUser(user)
   }
+  refreshRoster()
 }
 
 function addUser(user: UserInfo): void {
   if (document.getElementById(`user-${CSS.escape(user.name)}`)) return
   const li = document.createElement('li')
   li.id = `user-${CSS.escape(user.name)}`
+  if (user.name === currentUsername) li.classList.add('is-self')
+
+  const avatar = document.createElement('div')
+  avatar.classList.add('user-avatar')
+  avatar.style.background = colorFor(user.name)
+  avatar.textContent = user.name.charAt(0).toUpperCase()
+  li.appendChild(avatar)
 
   const nameSpan = document.createElement('span')
   nameSpan.classList.add('user-name')
   nameSpan.textContent = user.name
   li.appendChild(nameSpan)
 
+  // Talking equalizer bars — shown via CSS when li has .is-talking.
+  const bars = document.createElement('span')
+  bars.classList.add('talking-bars')
+  bars.innerHTML = '<span></span><span></span><span></span>'
+  li.appendChild(bars)
+
   const muteIcon = document.createElement('span')
   muteIcon.classList.add('icon-muted')
   muteIcon.title = 'Muted'
-  muteIcon.textContent = '\u{1F507}' // 🔇
+  muteIcon.innerHTML = USER_MIC_OFF_SVG
   li.appendChild(muteIcon)
 
   const deafIcon = document.createElement('span')
   deafIcon.classList.add('icon-deafened')
   deafIcon.title = 'Deafened'
-  deafIcon.textContent = '\u{1F515}' // 🔕
+  deafIcon.innerHTML = USER_DEAF_SVG
   li.appendChild(deafIcon)
 
   userList.appendChild(li)
   applyUserState(li, user)
+  refreshRoster()
 }
 
 function removeUser(name: string): void {
   document.getElementById(`user-${CSS.escape(name)}`)?.remove()
+  refreshRoster()
+}
+
+// Updates the roster count pill and renders/clears the empty-state block.
+// Counts only <li> rows so the .empty-state <div> is never miscounted.
+function refreshRoster(): void {
+  const count = userList.querySelectorAll('li').length
+  userCount.textContent = String(count)
+  const existingEmpty = userList.querySelector('.empty-state')
+  if (count === 0) {
+    if (!existingEmpty) userList.appendChild(makeEmptyState())
+  } else {
+    existingEmpty?.remove()
+  }
+}
+
+function makeEmptyState(): HTMLElement {
+  const wrap = document.createElement('div')
+  wrap.classList.add('empty-state')
+  const icon = document.createElement('div')
+  icon.classList.add('empty-icon')
+  icon.innerHTML = USERS_SLASH_SVG
+  const text = document.createElement('div')
+  const title = document.createElement('div')
+  title.classList.add('empty-title')
+  title.textContent = 'No one else is here'
+  const sub = document.createElement('div')
+  sub.classList.add('empty-sub')
+  sub.textContent = "You're the only one connected. Share the link to invite others."
+  text.appendChild(title)
+  text.appendChild(sub)
+  wrap.appendChild(icon)
+  wrap.appendChild(text)
+  return wrap
 }
 
 function applyUserState(
@@ -312,24 +444,46 @@ function appendRoomEvent(kind: RoomEventKind, username: string): void {
   const div = document.createElement('div')
   div.classList.add('message', 'chat-event')
   div.appendChild(makeTimestampSpan())
+  const line = `${username} ${ROOM_EVENT_TEXT[kind]}`
   const text = document.createElement('span')
-  text.textContent = `${username} ${ROOM_EVENT_TEXT[kind]}`
+  text.textContent = line
   div.appendChild(text)
   chatMessages.appendChild(div)
   chatMessages.scrollTop = chatMessages.scrollHeight
+  setSheetLatest(line)
 }
 
 function appendMessage(from: string, message: string): void {
+  // Server messages carry no sender (e.g. the MOTD / ASCII welcome banner) —
+  // render them as a bordered monospace block rather than a chat line.
+  if (!from) {
+    const welcome = document.createElement('div')
+    welcome.classList.add('chat-welcome')
+    const pre = document.createElement('pre')
+    pre.innerHTML = message
+    welcome.appendChild(pre)
+    chatMessages.appendChild(welcome)
+    chatMessages.scrollTop = chatMessages.scrollHeight
+    setSheetLatest(pre.textContent ?? '')
+    return
+  }
+
   const div = document.createElement('div')
   div.classList.add('message')
   div.appendChild(makeTimestampSpan())
   const label = document.createElement('span')
   label.classList.add('from')
   label.textContent = from ? `${from}: ` : ''
+  // Match the sender's avatar color (same hash as the roster).
+  if (from) label.style.color = colorFor(from)
   const text = document.createElement('span')
+  text.classList.add('body')
   text.innerHTML = message
   div.appendChild(label)
   div.appendChild(text)
   chatMessages.appendChild(div)
   chatMessages.scrollTop = chatMessages.scrollHeight
+  // Collapsed mobile sheet preview — plain text, not the message's markup.
+  const preview = from ? `${from}: ${text.textContent ?? ''}` : (text.textContent ?? '')
+  setSheetLatest(preview)
 }

@@ -169,6 +169,11 @@ export class MumbleWebRTCClient {
   // audio output, so no client-side mixing code is needed.
   private remoteAudioEls = new Map<string, HTMLAudioElement>()
   private manuallyMuted = false
+  // Local-only deafen: silences every remote <audio> element's playback (and
+  // keeps newly-arriving track slots silenced) without any server signalling,
+  // so other Mumble users don't see us as deafened. Deafening also forces
+  // mute, mirroring a native client.
+  private deafened = false
   private micTrack: MediaStreamTrack | null = null
   // The unprocessed hardware capture track, kept separately so cleanup() can
   // stop it: when RNNoise is on, micTrack is the *processed* destination
@@ -325,6 +330,7 @@ export class MumbleWebRTCClient {
       el.autoplay = true
       el.setAttribute('playsinline', '')
       el.style.display = 'none'
+      el.muted = this.deafened
       el.srcObject = new MediaStream([evt.track])
       document.body.appendChild(el)
       this.remoteAudioEls.set(evt.track.id, el)
@@ -470,6 +476,15 @@ export class MumbleWebRTCClient {
     this.manuallyMuted = muted
     this.send({ type: 'mute', muted })
     this.updateTransmission()
+  }
+
+  // Local-only: mutes/unmutes playback of every remote audio element. Deafening
+  // also forces self-mute (a native client can't be deaf-but-transmitting).
+  // Not signalled to the server, so remote users won't see our deaf state.
+  setDeafened(deafened: boolean): void {
+    this.deafened = deafened
+    for (const el of this.remoteAudioEls.values()) el.muted = deafened
+    if (deafened) this.setMuted(true)
   }
 
   // Stops audio leaving the browser entirely (rather than just having the
