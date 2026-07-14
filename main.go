@@ -83,7 +83,13 @@ func renderIndex(dist fs.FS, title, about string) ([]byte, error) {
 		return nil, err
 	}
 	var buf bytes.Buffer
-	err = tmpl.Execute(&buf, struct{ Title, About string }{Title: title, About: about})
+	// About is rendered unescaped so operators can embed markup (e.g. links).
+	// It comes from server-side config (an env var set by the operator), not
+	// untrusted user input, so this is not an XSS risk.
+	err = tmpl.Execute(&buf, struct {
+		Title string
+		About template.HTML
+	}{Title: title, About: template.HTML(about)})
 	if err != nil {
 		return nil, err
 	}
