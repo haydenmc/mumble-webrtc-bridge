@@ -42,6 +42,11 @@ type Config struct {
 	// (including the client's own). Callers that care about "who's in my
 	// channel" should re-read Client.SelfChannelUsers.
 	OnUserMoved func(c *Client)
+	// OnUserMuteChanged/OnUserDeafChanged fire when an already-known user's
+	// mute/deafen flags change (not on their initial join, which
+	// OnUserJoined already covers).
+	OnUserMuteChanged func(c *Client, name string, muted, selfMuted bool)
+	OnUserDeafChanged func(c *Client, name string, deafened, selfDeafened bool)
 	// OnAudio fires once per received audio packet, carrying the raw
 	// (undecoded) Opus payload. session identifies the speaking user.
 	OnAudio func(c *Client, session uint32, seq int64, final bool, opus []byte)

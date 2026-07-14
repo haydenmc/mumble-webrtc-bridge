@@ -119,6 +119,9 @@ func (c *Client) handleUserState(data []byte) error {
 		u = &User{Session: session}
 		c.users[session] = u
 	}
+	oldMuted, oldSelfMuted := u.Muted, u.SelfMuted
+	oldDeafened, oldSelfDeafened := u.Deafened, u.SelfDeafened
+
 	if p.Name != nil {
 		u.Name = *p.Name
 	}
@@ -128,6 +131,14 @@ func (c *Client) handleUserState(data []byte) error {
 	if p.Mute != nil {
 		u.Muted = *p.Mute
 	}
+	if p.SelfDeaf != nil {
+		u.SelfDeafened = *p.SelfDeaf
+	}
+	if p.Deaf != nil {
+		u.Deafened = *p.Deaf
+	}
+	muteChanged := u.Muted != oldMuted || u.SelfMuted != oldSelfMuted
+	deafChanged := u.Deafened != oldDeafened || u.SelfDeafened != oldSelfDeafened
 
 	channelChanged := false
 	if p.ChannelId != nil || u.Channel == nil {
@@ -152,6 +163,9 @@ func (c *Client) handleUserState(data []byte) error {
 		c.self = u
 	}
 	synced := c.synced
+	name := u.Name
+	muted, selfMuted := u.Muted, u.SelfMuted
+	deafened, selfDeafened := u.Deafened, u.SelfDeafened
 
 	c.mu.Unlock()
 
@@ -160,9 +174,17 @@ func (c *Client) handleUserState(data []byte) error {
 		return nil
 	}
 	if isNew && c.cfg.OnUserJoined != nil {
-		c.cfg.OnUserJoined(c, u.Name)
+		c.cfg.OnUserJoined(c, name)
 	} else if channelChanged && c.cfg.OnUserMoved != nil {
 		c.cfg.OnUserMoved(c)
+	}
+	if !isNew {
+		if muteChanged && c.cfg.OnUserMuteChanged != nil {
+			c.cfg.OnUserMuteChanged(c, name, muted, selfMuted)
+		}
+		if deafChanged && c.cfg.OnUserDeafChanged != nil {
+			c.cfg.OnUserDeafChanged(c, name, deafened, selfDeafened)
+		}
 	}
 	return nil
 }

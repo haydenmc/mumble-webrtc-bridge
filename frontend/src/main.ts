@@ -1,4 +1,4 @@
-import { MumbleWebRTCClient } from './client'
+import { MumbleWebRTCClient, type RoomEventKind, type UserInfo } from './client'
 
 // --- DOM refs ---
 const viewLogin = document.getElementById('view-login')!
@@ -38,10 +38,22 @@ function createClient(): MumbleWebRTCClient {
         setUserList(users)
       },
       onUserJoined(username) {
-        addUser(username)
+        addUser({ name: username, muted: false, selfMuted: false, deafened: false, selfDeafened: false })
       },
       onUserLeft(username) {
         removeUser(username)
+      },
+      onMuteState(username, muted, selfMuted) {
+        updateUserState(username, { muted, selfMuted })
+      },
+      onDeafState(username, deafened, selfDeafened) {
+        updateUserState(username, { deafened, selfDeafened })
+      },
+      onTalking(username, talking) {
+        setTalking(username, talking)
+      },
+      onRoomEvent(kind, username) {
+        appendRoomEvent(kind, username)
       },
       onDisconnected() {
         showLogin()
@@ -143,29 +155,113 @@ function showLoginError(msg: string): void {
 }
 
 // --- User list helpers ---
-function setUserList(users: string[]): void {
+function setUserList(users: UserInfo[]): void {
   userList.innerHTML = ''
-  for (const name of users) {
-    addUser(name)
+  for (const user of users) {
+    addUser(user)
   }
 }
 
-function addUser(name: string): void {
-  if (document.getElementById(`user-${CSS.escape(name)}`)) return
+function addUser(user: UserInfo): void {
+  if (document.getElementById(`user-${CSS.escape(user.name)}`)) return
   const li = document.createElement('li')
-  li.id = `user-${CSS.escape(name)}`
-  li.textContent = name
+  li.id = `user-${CSS.escape(user.name)}`
+
+  const nameSpan = document.createElement('span')
+  nameSpan.classList.add('user-name')
+  nameSpan.textContent = user.name
+  li.appendChild(nameSpan)
+
+  const muteIcon = document.createElement('span')
+  muteIcon.classList.add('icon-muted')
+  muteIcon.title = 'Muted'
+  muteIcon.textContent = '\u{1F507}' // 🔇
+  li.appendChild(muteIcon)
+
+  const deafIcon = document.createElement('span')
+  deafIcon.classList.add('icon-deafened')
+  deafIcon.title = 'Deafened'
+  deafIcon.textContent = '\u{1F515}' // 🔕
+  li.appendChild(deafIcon)
+
   userList.appendChild(li)
+  applyUserState(li, user)
 }
 
 function removeUser(name: string): void {
   document.getElementById(`user-${CSS.escape(name)}`)?.remove()
 }
 
+function applyUserState(
+  li: HTMLElement,
+  state: { muted?: boolean; selfMuted?: boolean; deafened?: boolean; selfDeafened?: boolean },
+): void {
+  if (state.muted !== undefined || state.selfMuted !== undefined) {
+    li.classList.toggle('is-muted', Boolean(state.muted || state.selfMuted))
+  }
+  if (state.deafened !== undefined || state.selfDeafened !== undefined) {
+    li.classList.toggle('is-deafened', Boolean(state.deafened || state.selfDeafened))
+  }
+}
+
+function updateUserState(
+  name: string,
+  state: { muted?: boolean; selfMuted?: boolean; deafened?: boolean; selfDeafened?: boolean },
+): void {
+  const li = document.getElementById(`user-${CSS.escape(name)}`)
+  if (!li) return
+  applyUserState(li, state)
+}
+
+function setTalking(name: string, talking: boolean): void {
+  const li = document.getElementById(`user-${CSS.escape(name)}`)
+  li?.classList.toggle('is-talking', talking)
+}
+
 // --- Chat helpers ---
+const ROOM_EVENT_TEXT: Record<RoomEventKind, string> = {
+  joined: 'connected.',
+  left: 'disconnected.',
+  muted: 'is now muted.',
+  unmuted: 'is no longer muted.',
+  deafened: 'is now deafened.',
+  undeafened: 'is no longer deafened.',
+}
+
+// Timestamps are stamped locally on arrival rather than carried over the
+// wire — these are live UI events, and the browser's own clock is what the
+// user reads everything else in the room against.
+function formatTimestamp(date: Date): string {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function makeTimestampSpan(): HTMLSpanElement {
+  const span = document.createElement('span')
+  span.classList.add('timestamp')
+  span.textContent = formatTimestamp(new Date())
+  return span
+}
+
+// Synthesized locally from roster events, same as a native Mumble client's
+// own event log — never a real chat message, so unlike appendMessage this
+// must not interpret `username` as HTML (a Mumble display name is
+// attacker-controlled and, unlike the `message` field, was never meant to
+// carry markup).
+function appendRoomEvent(kind: RoomEventKind, username: string): void {
+  const div = document.createElement('div')
+  div.classList.add('message', 'chat-event')
+  div.appendChild(makeTimestampSpan())
+  const text = document.createElement('span')
+  text.textContent = `${username} ${ROOM_EVENT_TEXT[kind]}`
+  div.appendChild(text)
+  chatMessages.appendChild(div)
+  chatMessages.scrollTop = chatMessages.scrollHeight
+}
+
 function appendMessage(from: string, message: string): void {
   const div = document.createElement('div')
   div.classList.add('message')
+  div.appendChild(makeTimestampSpan())
   const label = document.createElement('span')
   label.classList.add('from')
   label.textContent = from ? `${from}: ` : ''

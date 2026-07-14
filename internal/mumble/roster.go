@@ -39,9 +39,22 @@ func (c *Channel) find(names []string) *Channel {
 
 // User is a user currently connected to the server.
 type User struct {
-	Session   uint32
-	Name      string
-	Channel   *Channel
-	Muted     bool
-	SelfMuted bool
+	Session      uint32
+	Name         string
+	Channel      *Channel
+	Muted        bool
+	SelfMuted    bool
+	Deafened     bool
+	SelfDeafened bool
+}
+
+// UserStatus is a snapshot of a User's display-relevant state, safe to hand
+// to callers outside the Client's lock (unlike *User, it holds no pointer
+// into the live roster/channel tree).
+type UserStatus struct {
+	Name         string
+	Muted        bool
+	SelfMuted    bool
+	Deafened     bool
+	SelfDeafened bool
 }
