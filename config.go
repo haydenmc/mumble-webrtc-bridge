@@ -17,6 +17,12 @@ type Config struct {
 	// for local podman, or the public IP in production).
 	BridgeHost string
 
+	// BridgeTitle and BridgeAbout let a server operator brand the page:
+	// Title fills <title> and the login header, About is an optional
+	// blurb shown under it on the login view.
+	BridgeTitle string
+	BridgeAbout string
+
 	TURNURLs       []string
 	TURNUsername   string
 	TURNCredential string
@@ -43,8 +49,9 @@ type Config struct {
 
 func loadConfig() (*Config, error) {
 	cfg := &Config{
-		MumblePort: 64738,
-		HTTPAddr:   ":8080",
+		MumblePort:  64738,
+		HTTPAddr:    ":8080",
+		BridgeTitle: "Mumble Bridge",
 	}
 
 	cfg.MumbleHost = os.Getenv("MUMBLE_HOST")
@@ -62,6 +69,10 @@ func loadConfig() (*Config, error) {
 
 	cfg.MumbleChannel = os.Getenv("MUMBLE_CHANNEL")
 	cfg.BridgeHost = os.Getenv("BRIDGE_HOST")
+	if title := os.Getenv("BRIDGE_TITLE"); title != "" {
+		cfg.BridgeTitle = title
+	}
+	cfg.BridgeAbout = os.Getenv("BRIDGE_ABOUT")
 	cfg.MumbleForceTCP = os.Getenv("MUMBLE_FORCE_TCP") != ""
 
 	if urls := os.Getenv("TURN_URLS"); urls != "" {

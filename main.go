@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"embed"
+	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
@@ -32,12 +34,26 @@ func main() {
 		UDPPortMax:     cfg.WebRTCUDPPortMax,
 	}, cfg.MumbleForceTCP)
 
-	// Serve compiled frontend.
+	// Serve compiled frontend. index.html is a template so operators can
+	// brand the page via BRIDGE_TITLE/BRIDGE_ABOUT; everything else is
+	// served as-is.
 	dist, err := fs.Sub(staticFiles, "frontend/dist")
 	if err != nil {
 		log.Fatalf("embed error: %v", err)
 	}
-	http.Handle("/", http.FileServer(http.FS(dist)))
+	index, err := renderIndex(dist, cfg.BridgeTitle, cfg.BridgeAbout)
+	if err != nil {
+		log.Fatalf("index template error: %v", err)
+	}
+	fileServer := http.FileServer(http.FS(dist))
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(index)
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -55,4 +71,21 @@ func main() {
 		log.Printf("listening on %s", cfg.HTTPAddr)
 		log.Fatal(http.ListenAndServe(cfg.HTTPAddr, nil))
 	}
+}
+
+func renderIndex(dist fs.FS, title, about string) ([]byte, error) {
+	raw, err := fs.ReadFile(dist, "index.html")
+	if err != nil {
+		return nil, err
+	}
+	tmpl, err := template.New("index.html").Parse(string(raw))
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	err = tmpl.Execute(&buf, struct{ Title, About string }{Title: title, About: about})
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
