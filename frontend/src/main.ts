@@ -48,10 +48,15 @@ const USERS_SLASH_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="23" y1="11" y2="11"/></svg>'
 
 // --- Per-user avatar color (stable hash → palette; reused for chat .from) ---
-const AVATAR_COLORS = [
-  '#5b8def', '#e08948', '#34d399', '#a06be0', '#e0567a', '#4bbfd0',
-  '#d9a441', '#6d7ee0', '#7dc15a', '#d066c4', '#3fb0a0', '#e08267',
-]
+// 32 colors, generated once so large rooms rarely repeat. Hues are spread
+// evenly around the wheel; lightness dips through the high-luminance
+// yellow/green/cyan band (min ~hue 100) and rises for the dark blues/violets
+// (max ~hue 280) so the white avatar initial stays legible on every swatch.
+const AVATAR_COLORS = Array.from({ length: 32 }, (_, i) => {
+  const hue = (i * 360) / 32
+  const light = 51 + 13 * Math.cos(((hue - 280) * Math.PI) / 180)
+  return `hsl(${hue.toFixed(0)}, 60%, ${light.toFixed(0)}%)`
+})
 function colorFor(name: string): string {
   let h = 0
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0
