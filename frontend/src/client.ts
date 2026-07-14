@@ -294,6 +294,20 @@ export class MumbleWebRTCClient {
     }
 
     this.pc.ontrack = (evt) => {
+      // Keep the receiver's jitter-buffer floor at zero. Note this is a
+      // *minimum* target in Chrome, not a cap, so it can't shrink an already
+      // inflated buffer — the actual latency fix is bridge-side RTP
+      // timestamping across silence gaps. This just guards against anything
+      // ever raising the floor. No-ops where unsupported (Safari < 17.4).
+      const receiver = evt.receiver as RTCRtpReceiver & {
+        jitterBufferTarget?: number | null
+      }
+      try {
+        receiver.jitterBufferTarget = 0
+      } catch {
+        /* unsupported / read-only */
+      }
+
       const el = document.createElement('audio')
       el.autoplay = true
       el.setAttribute('playsinline', '')

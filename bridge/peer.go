@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,8 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/hayden/mumble-webrtc-bridge/internal/mumble"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
 )
 
 // remoteTrackSlots is the maximum number of Mumble users this bridge will
@@ -38,12 +39,32 @@ const slotReapInterval = 250 * time.Millisecond
 // actually speaking.
 const talkIdleTimeout = 300 * time.Millisecond
 
+// opusClockRate is the RTP clock rate for Opus (always 48kHz, regardless of
+// the actual audio sample rate) used to derive RTP timestamp increments.
+const opusClockRate = 48000
+
+// rtpGapThreshold: when the wall-clock gap since a slot's previous packet
+// exceeds this, the RTP timestamp is advanced by the elapsed time (and the
+// marker bit set) instead of by one frame duration. This makes the browser's
+// jitter buffer see genuine silence between talk spurts rather than a stream
+// whose timestamps are suddenly a gap-length behind — the latter is read as
+// extreme lateness and inflates NetEq's adaptive playout delay toward ~1s.
+const rtpGapThreshold = 100 * time.Millisecond
+
 // trackSlot binds one pooled outbound WebRTC track to whichever Mumble
 // session is currently occupying it (session 0 means free).
 type trackSlot struct {
-	track      *webrtc.TrackLocalStaticSample
+	track      *webrtc.TrackLocalStaticRTP
 	session    uint32
 	lastActive time.Time
+
+	// Outbound RTP state, guarded by slotsMu. Seq/timestamp continuity
+	// belongs to the track (SSRC), not the speaker, so this survives slot
+	// reassignment: a new speaker just continues the sequence with a
+	// forward timestamp jump, which reads as a normal talk-spurt boundary.
+	rtpSeq    uint16
+	rtpTS     uint32
+	lastWrite time.Time
 }
 
 // talkEntry is one session's talking-indicator bookkeeping; see the
@@ -287,7 +308,7 @@ func (p *Peer) setupWebRTC() error {
 	// browser's own audio mixing combine them.
 	p.slotsMu.Lock()
 	for i := 0; i < remoteTrackSlots; i++ {
-		track, err := webrtc.NewTrackLocalStaticSample(
+		track, err := webrtc.NewTrackLocalStaticRTP(
 			webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus},
 			fmt.Sprintf("slot%d", i), "mumble",
 		)
@@ -299,7 +320,12 @@ func (p *Peer) setupWebRTC() error {
 			p.slotsMu.Unlock()
 			return err
 		}
-		p.slots[i] = &trackSlot{track: track}
+		// Random initial seq/timestamp per RFC 3550.
+		p.slots[i] = &trackSlot{
+			track:  track,
+			rtpSeq: uint16(rand.Uint32()),
+			rtpTS:  rand.Uint32(),
+		}
 	}
 	p.slotsMu.Unlock()
 	// Mumble audio can start arriving (via OnAudio, on the mumble.Client's
@@ -440,11 +466,32 @@ func (p *Peer) handleMumbleAudio(session uint32, opus []byte) {
 	if slot == nil {
 		return // pool exhausted; drop this speaker's audio
 	}
-	if err := slot.track.WriteSample(media.Sample{
-		Data:     opus,
-		Duration: opusFrameDuration(opus),
-	}); err != nil {
-		log.Printf("peer %s: write remote sample: %v", p.id, err)
+
+	durTicks := uint32(opusFrameDuration(opus).Nanoseconds() * opusClockRate / int64(time.Second))
+
+	// Build the RTP header under slotsMu: OnAudio can fire concurrently from
+	// the UDP read loop and the TCP tunnel dispatch loop, which interleave
+	// during UDP<->TCP transitions.
+	p.slotsMu.Lock()
+	now := time.Now()
+	marker := slot.lastWrite.IsZero()
+	if gap := now.Sub(slot.lastWrite); !marker && gap > rtpGapThreshold {
+		slot.rtpTS += uint32(gap.Nanoseconds() * opusClockRate / int64(time.Second))
+		marker = true
+	}
+	slot.lastWrite = now
+	hdr := rtp.Header{
+		Version:        2,
+		Marker:         marker,
+		SequenceNumber: slot.rtpSeq,
+		Timestamp:      slot.rtpTS,
+	}
+	slot.rtpSeq++
+	slot.rtpTS += durTicks
+	p.slotsMu.Unlock()
+
+	if err := slot.track.WriteRTP(&rtp.Packet{Header: hdr, Payload: opus}); err != nil {
+		log.Printf("peer %s: write remote rtp: %v", p.id, err)
 	}
 }
 
