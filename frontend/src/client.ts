@@ -58,35 +58,61 @@ class LoudnessProcessor extends AudioWorkletProcessor {
 registerProcessor('loudness-processor', LoudnessProcessor)
 `
 
-// forceOpusCBR appends constant-bitrate parameters to the opus fmtp line(s)
-// in an SDP offer before it's sent. Diagnostic/mitigation for a suspected
-// cause of intermittent garbled audio: WebRTC's opus encoder adaptively
-// switches CELT bandwidth (SWB <-> FB) mid-stream, and each switch resets
-// CELT's internal MDCT/overlap-add state, which can produce an audible
-// glitch right at the switch. cbr=1 alone only pins bitrate, not bandwidth
-// mode — libopus's automatic bandwidth selection is bitrate-dependent, and
-// 64kbps sits close enough to the SWB/FB decision boundary that per-frame
-// complexity variation can still tip it either way. Pushing the bitrate
-// well clear of that boundary should stabilize the bandwidth choice.
-// Applies to every m= section's opus fmtp line rather than just the mic's;
-// the extra ones are on recvonly transceivers that never send anything, so
+// applyOpusOptions rewrites the opus fmtp line(s) in an SDP offer before
+// it's sent, pinning constant bitrate at the user-configured value. Applies
+// to every m= section's opus fmtp line rather than just the mic's; the
+// extra ones are on recvonly transceivers that never send anything, so
 // it's a no-op there, not worth the complexity of targeting only the mic's
 // line.
-function forceOpusCBR(sdp: string): string {
+//
+// When lowDelay is set, also shrinks the Opus frame size (SDP ptime) from
+// the browser's ~20ms default to 10ms. Browsers don't expose libopus's
+// internal low-delay application mode through the WebRTC API, so this is
+// the closest real lever: a smaller frame means less algorithmic buffering
+// latency, at the cost of more packet overhead. Some browsers (e.g.
+// Firefox) don't emit a=ptime/a=maxptime in the offer at all unless a
+// non-default value is requested, so these lines must be inserted when
+// absent rather than only rewritten when present.
+function applyOpusOptions(sdp: string, bitrateBps: number, lowDelay: boolean): string {
   const pts = new Set<string>()
   for (const m of sdp.matchAll(/^a=rtpmap:(\d+) opus\/48000/gim)) {
     pts.add(m[1])
   }
   if (pts.size === 0) return sdp
   const fmtpLine = new RegExp(`^(a=fmtp:(?:${[...pts].join('|')}) )(.*)$`, 'gim')
-  return sdp.replace(fmtpLine, (_match, prefix: string, params: string) => {
-    const kept = params
-      .split(';')
-      .map((p) => p.trim())
-      .filter((p) => p !== '' && !p.startsWith('cbr=') && !p.startsWith('maxaveragebitrate='))
-    kept.push('cbr=1', 'maxaveragebitrate=128000')
-    return prefix + kept.join(';')
-  })
+
+  // Process one m= section at a time so ptime/maxptime insertion (which is
+  // per-section, unlike fmtp which is per-payload-type) lands next to the
+  // right section's fmtp line rather than only the first one in the SDP.
+  const sections = sdp.split(/(?=^m=)/im)
+  return sections
+    .map((section) => {
+      fmtpLine.lastIndex = 0
+      if (!fmtpLine.test(section)) return section
+      let result = section.replace(fmtpLine, (_match, prefix: string, params: string) => {
+        const kept = params
+          .split(';')
+          .map((p) => p.trim())
+          .filter((p) => p !== '' && !p.startsWith('cbr=') && !p.startsWith('maxaveragebitrate='))
+        kept.push('cbr=1', `maxaveragebitrate=${bitrateBps}`)
+        return prefix + kept.join(';')
+      })
+      if (lowDelay) {
+        const hasPtime = /^a=ptime:/im.test(result)
+        const hasMaxptime = /^a=maxptime:/im.test(result)
+        result = result.replace(/^a=ptime:\d+$/im, 'a=ptime:10')
+        result = result.replace(/^a=maxptime:\d+$/im, 'a=maxptime:10')
+        const toInsert = [
+          ...(hasPtime ? [] : ['a=ptime:10']),
+          ...(hasMaxptime ? [] : ['a=maxptime:10']),
+        ]
+        if (toInsert.length > 0) {
+          result = result.replace(/^(a=fmtp:.*)$/im, (m) => `${m}\n${toInsert.join('\n')}`)
+        }
+      }
+      return result
+    })
+    .join('')
 }
 
 export interface UserInfo {
@@ -152,6 +178,8 @@ export class MumbleWebRTCClient {
     private turnURLs: string[] = [],
     private turnUsername: string = '',
     private turnCredential: string = '',
+    private opusBitrateBps: number = 96000,
+    private opusLowDelay: boolean = true,
   ) {}
 
   connect(username: string, password: string): void {
@@ -349,7 +377,7 @@ export class MumbleWebRTCClient {
     this.updateTransmission()
 
     const offer = await this.pc.createOffer()
-    const sdp = forceOpusCBR(offer.sdp ?? '')
+    const sdp = applyOpusOptions(offer.sdp ?? '', this.opusBitrateBps, this.opusLowDelay)
     await this.pc.setLocalDescription({ type: offer.type, sdp })
     this.send({ type: 'sdp', sdpType: 'offer', sdp })
   }

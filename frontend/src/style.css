@@ -87,6 +87,43 @@ form input:focus { border-color: var(--highlight); }
   margin-bottom: .75rem;
 }
 
+.advanced-options {
+  margin-bottom: 1rem;
+  padding-top: .75rem;
+  border-top: 1px solid var(--border);
+}
+
+.advanced-options summary {
+  cursor: pointer;
+  font-size: .85rem;
+  color: var(--text-muted);
+  margin-bottom: .75rem;
+}
+
+.advanced-options select {
+  display: block;
+  width: 100%;
+  padding: .55rem .75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 1rem;
+  margin-bottom: .75rem;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  font-size: .85rem;
+  color: var(--text);
+  margin-bottom: 0;
+  cursor: pointer;
+}
+
+.checkbox-label input { margin: 0; width: auto; }
+
 button[type="submit"],
 #connect-btn {
   width: 100%;

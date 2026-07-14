@@ -18,6 +18,22 @@
         <label for="password">Server Password</label>
         <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
         <p id="login-error" class="error hidden"></p>
+        <details class="advanced-options">
+          <summary>Advanced options</summary>
+          <label for="bitrate-select">Opus encode bitrate</label>
+          <select id="bitrate-select">
+            <option value="24000">24 kbps</option>
+            <option value="32000">32 kbps</option>
+            <option value="48000">48 kbps</option>
+            <option value="64000">64 kbps</option>
+            <option value="96000" selected>96 kbps</option>
+            <option value="128000">128 kbps</option>
+          </select>
+          <label class="checkbox-label">
+            <input type="checkbox" id="low-delay-toggle" checked />
+            Low delay mode
+          </label>
+        </details>
         <button type="submit" id="connect-btn">Connect</button>
       </form>
     </div>

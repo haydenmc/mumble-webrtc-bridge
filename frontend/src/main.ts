@@ -6,6 +6,8 @@ const viewRoom = document.getElementById('view-room')!
 const loginForm = document.getElementById('login-form') as HTMLFormElement
 const usernameInput = document.getElementById('username') as HTMLInputElement
 const passwordInput = document.getElementById('password') as HTMLInputElement
+const bitrateSelect = document.getElementById('bitrate-select') as HTMLSelectElement
+const lowDelayToggle = document.getElementById('low-delay-toggle') as HTMLInputElement
 const loginError = document.getElementById('login-error')!
 const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement
 const muteBtn = document.getElementById('mute-btn') as HTMLButtonElement
@@ -20,7 +22,7 @@ let muted = false
 let currentUsername = ''
 
 // --- Client setup ---
-function createClient(): MumbleWebRTCClient {
+function createClient(bitrateBps: number, lowDelay: boolean): MumbleWebRTCClient {
   return new MumbleWebRTCClient(
     {
       onConnected() {
@@ -63,6 +65,8 @@ function createClient(): MumbleWebRTCClient {
     [],
     '',
     '',
+    bitrateBps,
+    lowDelay,
   )
 }
 
@@ -87,6 +91,28 @@ function saveCredentials(username: string, password: string): void {
 
 loadCredentials()
 
+// --- Persist advanced options ---
+const ADVANCED_OPTIONS_STORAGE_KEY = 'mumble-bridge-advanced-options'
+const DEFAULT_BITRATE_BPS = 96000
+
+function loadAdvancedOptions(): void {
+  try {
+    const saved = localStorage.getItem(ADVANCED_OPTIONS_STORAGE_KEY)
+    if (!saved) return
+    const { bitrateBps, lowDelay } = JSON.parse(saved)
+    if (bitrateBps) bitrateSelect.value = String(bitrateBps)
+    if (lowDelay !== undefined) lowDelayToggle.checked = Boolean(lowDelay)
+  } catch {
+    // ignore malformed storage
+  }
+}
+
+function saveAdvancedOptions(bitrateBps: number, lowDelay: boolean): void {
+  localStorage.setItem(ADVANCED_OPTIONS_STORAGE_KEY, JSON.stringify({ bitrateBps, lowDelay }))
+}
+
+loadAdvancedOptions()
+
 // --- Login ---
 loginForm.addEventListener('submit', (e) => {
   e.preventDefault()
@@ -94,13 +120,17 @@ loginForm.addEventListener('submit', (e) => {
   const password = passwordInput.value
   if (!username) return
 
+  const bitrateBps = parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS
+  const lowDelay = lowDelayToggle.checked
+
   saveCredentials(username, password)
+  saveAdvancedOptions(bitrateBps, lowDelay)
   loginError.classList.add('hidden')
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
 
   currentUsername = username
-  client = createClient()
+  client = createClient(bitrateBps, lowDelay)
   client.connect(username, password)
 })
 
