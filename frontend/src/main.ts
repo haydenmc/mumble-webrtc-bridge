@@ -8,6 +8,7 @@ const usernameInput = document.getElementById('username') as HTMLInputElement
 const passwordInput = document.getElementById('password') as HTMLInputElement
 const bitrateSelect = document.getElementById('bitrate-select') as HTMLSelectElement
 const lowDelayToggle = document.getElementById('low-delay-toggle') as HTMLInputElement
+const noiseSuppressionToggle = document.getElementById('noise-suppression-toggle') as HTMLInputElement
 const loginError = document.getElementById('login-error')!
 const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement
 const muteBtn = document.getElementById('mute-btn') as HTMLButtonElement
@@ -22,7 +23,7 @@ let muted = false
 let currentUsername = ''
 
 // --- Client setup ---
-function createClient(bitrateBps: number, lowDelay: boolean): MumbleWebRTCClient {
+function createClient(bitrateBps: number, lowDelay: boolean, noiseSuppression: boolean): MumbleWebRTCClient {
   return new MumbleWebRTCClient(
     {
       onConnected() {
@@ -67,6 +68,7 @@ function createClient(bitrateBps: number, lowDelay: boolean): MumbleWebRTCClient
     '',
     bitrateBps,
     lowDelay,
+    noiseSuppression,
   )
 }
 
@@ -99,16 +101,20 @@ function loadAdvancedOptions(): void {
   try {
     const saved = localStorage.getItem(ADVANCED_OPTIONS_STORAGE_KEY)
     if (!saved) return
-    const { bitrateBps, lowDelay } = JSON.parse(saved)
+    const { bitrateBps, lowDelay, noiseSuppression } = JSON.parse(saved)
     if (bitrateBps) bitrateSelect.value = String(bitrateBps)
     if (lowDelay !== undefined) lowDelayToggle.checked = Boolean(lowDelay)
+    if (noiseSuppression !== undefined) noiseSuppressionToggle.checked = Boolean(noiseSuppression)
   } catch {
     // ignore malformed storage
   }
 }
 
-function saveAdvancedOptions(bitrateBps: number, lowDelay: boolean): void {
-  localStorage.setItem(ADVANCED_OPTIONS_STORAGE_KEY, JSON.stringify({ bitrateBps, lowDelay }))
+function saveAdvancedOptions(bitrateBps: number, lowDelay: boolean, noiseSuppression: boolean): void {
+  localStorage.setItem(
+    ADVANCED_OPTIONS_STORAGE_KEY,
+    JSON.stringify({ bitrateBps, lowDelay, noiseSuppression }),
+  )
 }
 
 loadAdvancedOptions()
@@ -122,15 +128,16 @@ loginForm.addEventListener('submit', (e) => {
 
   const bitrateBps = parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS
   const lowDelay = lowDelayToggle.checked
+  const noiseSuppression = noiseSuppressionToggle.checked
 
   saveCredentials(username, password)
-  saveAdvancedOptions(bitrateBps, lowDelay)
+  saveAdvancedOptions(bitrateBps, lowDelay, noiseSuppression)
   loginError.classList.add('hidden')
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
 
   currentUsername = username
-  client = createClient(bitrateBps, lowDelay)
+  client = createClient(bitrateBps, lowDelay, noiseSuppression)
   client.connect(username, password)
 })
 
