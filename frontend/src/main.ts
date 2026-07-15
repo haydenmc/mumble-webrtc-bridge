@@ -50,8 +50,6 @@ const USER_MIC_OFF_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
 const USER_DEAF_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><line x1="2" x2="22" y1="2" y2="22"/><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 13.4-7.83"/><path d="M20.6 8.4A9 9 0 0 1 21 12v5.5"/><path d="M18 21a2 2 0 0 1-2-2v-3"/></svg>'
-const USERS_SLASH_SVG =
-  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="17" x2="23" y1="11" y2="11"/></svg>'
 
 // --- Per-user avatar color (stable hash → palette; reused for chat .from) ---
 // 32 colors, generated once so large rooms rarely repeat. Hues are spread
@@ -324,7 +322,7 @@ function showRoom(): void {
   loginError.classList.add('hidden')
   viewLogin.classList.add('hidden')
   viewRoom.classList.remove('hidden')
-  // Render the empty state / count immediately in case no roster arrives yet.
+  // Render the roster count immediately in case no roster arrives yet.
   refreshRoster()
 }
 
@@ -403,37 +401,9 @@ function removeUser(name: string): void {
   refreshRoster()
 }
 
-// Updates the roster count pill and renders/clears the empty-state block.
-// Counts only <li> rows so the .empty-state <div> is never miscounted.
+// Updates the roster count pill from the number of user tiles.
 function refreshRoster(): void {
-  const count = userList.querySelectorAll('li').length
-  userCount.textContent = String(count)
-  const existingEmpty = userList.querySelector('.empty-state')
-  if (count === 0) {
-    if (!existingEmpty) userList.appendChild(makeEmptyState())
-  } else {
-    existingEmpty?.remove()
-  }
-}
-
-function makeEmptyState(): HTMLElement {
-  const wrap = document.createElement('div')
-  wrap.classList.add('empty-state')
-  const icon = document.createElement('div')
-  icon.classList.add('empty-icon')
-  icon.innerHTML = USERS_SLASH_SVG
-  const text = document.createElement('div')
-  const title = document.createElement('div')
-  title.classList.add('empty-title')
-  title.textContent = 'No one else is here'
-  const sub = document.createElement('div')
-  sub.classList.add('empty-sub')
-  sub.textContent = "You're the only one connected. Share the link to invite others."
-  text.appendChild(title)
-  text.appendChild(sub)
-  wrap.appendChild(icon)
-  wrap.appendChild(text)
-  return wrap
+  userCount.textContent = String(userList.querySelectorAll('li').length)
 }
 
 function applyUserState(

@@ -274,19 +274,6 @@ input::placeholder { color: #8a8a8a; }
 .user-tile.is-talking .talking-bars { display: flex; }
 @keyframes mbar { 0%,100% { transform: scaleY(.3); } 50% { transform: scaleY(1); } }
 
-/* empty state (rendered by JS when the roster is empty) */
-.empty-state {
-  grid-column: 1 / -1;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  text-align: center; padding: 50px 16px; gap: 12px; color: var(--muted);
-}
-.empty-state .empty-icon {
-  width: 58px; height: 58px; border: 2px solid var(--border);
-  display: flex; align-items: center; justify-content: center; color: var(--faint);
-}
-.empty-state .empty-title { font-size: .95rem; font-weight: 600; color: #fff; }
-.empty-state .empty-sub   { font-size: .84rem; color: var(--muted); line-height: 1.45; max-width: 260px; }
-
 /* ---- Chat ---- */
 .chat-panel {
   grid-area: chat;
