@@ -1,37 +1,36 @@
 /* =====================================================================
-   Styles for the browser client — a dark navy/coral theme built on the
-   design tokens in :root (colors, radii). Two views: a centered login
-   card and the room (sidebar roster + chat panel). Responsive down to a
-   mobile layout (<= 640px) where the roster stays visible and chat
-   collapses into a bottom sheet.
+   Browser client — "Metro" theme (Windows Phone lineage): flat black
+   surfaces, a single magenta accent, sharp (zero-radius) edges, thin
+   large headings, and colored square user tiles. Two views: a login
+   screen and the room (top app bar + roster tiles + chat). Responsive
+   down to a mobile layout (<= 640px) where the roster stays visible,
+   voice controls drop to a centred bar, and chat collapses into a
+   bottom sheet.
    ===================================================================== */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Base scale: 125% of the 16px default so the whole UI (all rem-based text
+   and spacing) reads larger and makes fuller use of the screen. */
+html { font-size: 125%; }
+
 :root {
-  --bg:            #10152a;
-  --surface:       #171d33;   /* sidebar / cards */
-  --surface-2:     #1f2740;   /* raised controls */
-  --panel:         #141a2e;   /* chat input bar, sheet */
-  --input:         #0e1428;
-  --border:        rgba(148,163,205,.12);
-  --border-strong: rgba(148,163,205,.16);
-  --text:          #e9ecf5;
-  --text-dim:      #dfe3ef;
-  --muted:         #8b94b0;
-  --faint:         #6b74a2;
-  --accent:        #e94560;
-  --accent-2:      #d13453;
-  --accent-soft:   rgba(233,69,96,.15);
-  --green:         #34d399;
-  --radius:        12px;
-  --radius-sm:     11px;
+  --bg:            #101010;   /* page background */
+  --surface:       #000;      /* room / login inner */
+  --accent:        #EC008C;
+  --accent-hover:  #ff1a9e;
+  --accent-active: #c40074;
+  --text:          #fff;
+  --text-dim:      #cfcfcf;
+  --muted:         #9a9a9a;
+  --faint:         #7a7a7a;
+  --border:        #2a2a2a;
   color-scheme: dark;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: "Segoe UI", "Segoe WP", Frutiger, "Helvetica Neue", system-ui, sans-serif;
 }
 
 body {
-  background: radial-gradient(1200px 700px at 20% -10%, #1b2444 0%, var(--bg) 55%, #0c1020 100%);
+  background: var(--bg);
   color: var(--text);
   height: 100dvh;
   -webkit-font-smoothing: antialiased;
@@ -40,312 +39,357 @@ body {
 .hidden { display: none !important; }
 .view   { width: 100%; height: 100dvh; }
 
-::-webkit-scrollbar { width: 9px; height: 9px; }
-::-webkit-scrollbar-thumb { background: rgba(148,163,205,.2); border-radius: 5px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(148,163,205,.32); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #333; }
 ::-webkit-scrollbar-track { background: transparent; }
-::selection { background: rgba(233,69,96,.35); }
-a { color: #ef7391; text-decoration: none; }
-a:hover { color: #f79ab1; }
-input::placeholder { color: #5f6884; }
+::selection { background: var(--accent); color: #fff; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-hover); }
+input::placeholder { color: #8a8a8a; }
+
+/* Shared brand eyebrow above the title on both views. */
+.brand-eyebrow {
+  font-size: .72rem; font-weight: 600; letter-spacing: .28em;
+  text-transform: uppercase; color: var(--accent);
+}
 
 /* ==================== LOGIN ==================== */
-#view-login { display: flex; align-items: center; justify-content: center; padding: 24px; }
-
-.card {
-  width: 100%; max-width: 372px;
-  background: linear-gradient(180deg, #1a2138 0%, #161c31 100%);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 30px 28px;
-  box-shadow: 0 24px 60px -20px rgba(0,0,0,.6);
+#view-login {
+  height: 100dvh; overflow-y: auto;
+  background: var(--surface);
+  padding: 46px 42px 42px;
 }
-
-/* Brand mark — add <div class="brand-mark"> with the mic SVG before the h1,
-   or keep the h1 alone; the mark is optional polish (see README). */
-.brand-mark {
-  width: 52px; height: 52px; margin: 0 auto 12px;
-  border-radius: 15px;
-  background: linear-gradient(150deg, var(--accent), #b8324a);
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 8px 20px -6px rgba(233,69,96,.6);
+.login-inner { max-width: 520px; }
+.login-title {
+  margin: 6px 0 4px;
+  font-size: 3.4rem; font-weight: 200; line-height: .95; letter-spacing: -.01em;
 }
-.brand-mark svg { width: 24px; height: 24px; stroke: #fff; }
-
-.card h1 { font-size: 1.4rem; font-weight: 700; text-align: center; letter-spacing: -.01em; }
-.card .about { margin-top: .4rem; margin-bottom: 1.4rem; font-size: .82rem; color: var(--muted); text-align: center; line-height: 1.45; }
-.card h1 + form { margin-top: 1.4rem; }
+.login-sub { font-size: .9rem; color: var(--muted); margin-bottom: 34px; }
 
 #login-form label {
-  display: block; margin-bottom: .4rem;
-  font-size: .74rem; font-weight: 600; letter-spacing: .03em;
-  text-transform: uppercase; color: var(--muted);
+  display: block; margin-bottom: 6px;
+  font-size: .82rem; font-weight: 600; letter-spacing: .02em; color: #b7b7b7;
 }
 
 #login-form input[type="text"],
 #login-form input[type="password"],
-.advanced-options select {
+.select-wrap select {
   display: block; width: 100%;
-  padding: .62rem .8rem; margin-bottom: 1rem;
-  background: var(--input);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  color: var(--text); font-size: .95rem;
-  outline: none; transition: border-color .15s, box-shadow .15s;
+  padding: .62rem .7rem; margin-bottom: 1.3rem;
+  background: #fff; border: 2px solid #fff; border-radius: 0;
+  color: #000; font-size: 1rem; font-family: inherit;
+  outline: none; transition: border-color .12s;
 }
 #login-form input:focus,
-.advanced-options select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.select-wrap select:focus { border-color: var(--accent); }
 
-.error { color: var(--accent); font-size: .85rem; margin-bottom: .75rem; }
+.error { color: var(--accent); font-size: .85rem; margin: -.4rem 0 1rem; }
 
-.advanced-options { margin-bottom: 1.1rem; padding-top: .9rem; border-top: 1px solid var(--border); }
+/* Advanced options — a caret disclosure of extra audio settings. */
+.advanced-options { margin-bottom: 1.6rem; }
 .advanced-options summary {
   cursor: pointer; list-style: none;
-  font-size: .82rem; font-weight: 600; color: var(--muted);
-  display: flex; align-items: center; gap: .4rem;
+  display: flex; align-items: center; gap: .5rem;
+  font-size: .82rem; font-weight: 600; letter-spacing: .02em; color: #b7b7b7;
+  margin-bottom: 1.15rem;
 }
 .advanced-options summary::-webkit-details-marker { display: none; }
 .advanced-options summary::before {
-  content: "▶"; font-size: .6rem; transition: transform .15s;
+  content: "▸"; font-size: .7rem; transition: transform .12s;
 }
 .advanced-options[open] summary::before { transform: rotate(90deg); }
-.advanced-options summary { margin-bottom: 0; }
-.advanced-options[open] summary { margin-bottom: .9rem; }
-.advanced-options select { appearance: none; cursor: pointer; margin-bottom: .8rem;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath fill='%238b94b0' d='M0 0h10L5 7z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right .8rem center;
-}
 
+/* Metro toggle switch — appearance-reset checkbox with a sliding thumb.
+   Laid out inline so `vertical-align: middle` centers the fixed-height toggle
+   against the text's x-height midline (its optical center) rather than the
+   geometric line-box center. */
 .checkbox-label {
-  display: flex; align-items: center; gap: .6rem;
-  font-size: .88rem; color: var(--text); margin-bottom: .6rem; cursor: pointer;
+  display: block;
+  font-size: .95rem; color: var(--text); margin-bottom: 1.15rem; cursor: pointer;
 }
-.checkbox-label input { width: 17px; height: 17px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.checkbox-label input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 52px; height: 26px; margin: 0 14px 0 0;
+  border: 2px solid #fff; background: transparent;
+  position: relative; vertical-align: middle; cursor: pointer; transition: .12s;
+}
+/* Metro thumb: a vertical white bar that slides left (off) → right (on). */
+.checkbox-label input[type="checkbox"]::after {
+  content: ""; position: absolute; top: 4px; bottom: 4px; left: 4px;
+  width: 8px; background: #fff; transition: .12s;
+}
+.checkbox-label input[type="checkbox"]:checked {
+  background: var(--accent); border-color: var(--accent);
+}
+.checkbox-label input[type="checkbox"]:checked::after { left: auto; right: 4px; }
+.checkbox-label span { vertical-align: middle; }
 
-#login-form button[type="submit"], #connect-btn {
-  width: 100%; padding: .72rem;
-  background: linear-gradient(150deg, var(--accent), var(--accent-2));
-  border: none; border-radius: var(--radius);
-  color: #fff; font-size: .98rem; font-weight: 700; cursor: pointer;
-  box-shadow: 0 10px 24px -8px rgba(233,69,96,.7);
-  transition: transform .1s, opacity .15s;
+.select-wrap { position: relative; }
+.select-wrap select { appearance: none; -webkit-appearance: none; cursor: pointer; padding-right: 2rem; }
+.select-wrap::after {
+  content: "▼"; position: absolute; right: .7rem; top: 50%;
+  transform: translateY(-50%); pointer-events: none; color: #000; font-size: .6rem;
 }
-#connect-btn:hover { transform: translateY(-1px); }
-#connect-btn:active { transform: translateY(0); }
-#connect-btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+
+/* --- Advanced options: one consistent vertical rhythm ---
+   A uniform 1.15rem gap between control groups (toggles and selects alike),
+   with a tight 6px pairing between a select's caption and the select itself.
+   The #login-form prefixes are required so these outrank the base
+   `#login-form label { margin-bottom: 6px }` rule (ID specificity), which
+   otherwise squashes the toggle spacing down to 6px. The select's own
+   bottom margin is zeroed so the .select-wrap owns the group gap. */
+#login-form .advanced-options .checkbox-label { margin-bottom: 1.15rem; }
+#login-form .advanced-options .select-wrap { margin-bottom: 1.15rem; }
+#login-form .advanced-options .select-wrap select { margin-bottom: 0; }
+
+#connect-btn {
+  width: 100%; padding: .85rem;
+  background: var(--accent); border: none; border-radius: 0;
+  color: #fff; font-size: 1rem; font-weight: 600; letter-spacing: .05em;
+  cursor: pointer; font-family: inherit; transition: background .12s;
+}
+#connect-btn:hover { background: var(--accent-hover); }
+#connect-btn:active { background: var(--accent-active); }
+#connect-btn:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ==================== ROOM ==================== */
-.room-layout { display: flex; height: 100dvh; }
-
-.sidebar {
-  width: 262px; flex-shrink: 0;
-  background: linear-gradient(180deg, var(--surface), var(--panel));
-  border-right: 1px solid var(--border);
-  display: flex; flex-direction: column;
+.room-layout {
+  position: relative;
+  display: grid;
+  grid-template-columns: 2fr 3fr;
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    "head head"
+    "users chat";
+  height: 100dvh;
+  background: var(--surface);
 }
 
-.sidebar-header {
-  padding: 18px 18px 14px;
-  display: flex; align-items: center; gap: 10px;
-  border-bottom: 1px solid var(--border);
+.app-bar {
+  grid-area: head;
+  /* generous right padding reserves room for the absolutely-positioned
+     .app-actions so a long title truncates instead of sliding under them */
+  padding: 32px 480px 18px 38px;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 20px;
 }
-.sidebar-header .brand-mark { width: 32px; height: 32px; border-radius: 9px; margin: 0; flex-shrink: 0; }
-.sidebar-header .brand-mark svg { width: 15px; height: 15px; }
-.sidebar-title { font-size: .95rem; font-weight: 700; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.conn-status { font-size: .7rem; color: var(--green); display: flex; align-items: center; gap: 5px; margin-top: 2px; }
-.conn-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
-
-.sidebar h2 {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 18px 8px;
-  font-size: .7rem; font-weight: 700; letter-spacing: .08em; color: var(--faint);
-  text-transform: uppercase;
+.app-brand { min-width: 0; }
+.app-brand .brand-eyebrow { letter-spacing: .24em; white-space: nowrap; }
+.room-title {
+  margin: 2px 0 0;
+  font-size: 2.5rem; font-weight: 200; line-height: 1; letter-spacing: -.01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.user-count { font-size: .7rem; font-weight: 600; color: var(--muted); background: rgba(148,163,205,.1); padding: 1px 8px; border-radius: 999px; letter-spacing: 0; }
 
+/* Voice controls: overlaid at the app bar's top-right on desktop. */
+.app-actions {
+  position: absolute; top: 32px; right: 38px;
+  display: flex; align-items: center; gap: 20px;
+}
+.ctrl-btn {
+  display: flex; align-items: center; gap: 11px;
+  background: none; border: none; cursor: pointer; font-family: inherit;
+}
+.ctrl-circle {
+  width: 50px; height: 50px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid #fff; background: transparent; color: #fff; transition: .12s;
+}
+.ctrl-circle svg { width: 22px; height: 22px; }
+#mute-btn.active .ctrl-circle,
+#deafen-btn.active .ctrl-circle { border-color: var(--accent); background: var(--accent); }
+.ctrl-circle-plain { border-color: #fff; }
+.ctrl-btn-disconnect:hover .ctrl-circle-plain { border-color: var(--accent); color: var(--accent); }
+.btn-label {
+  font-size: .72rem; letter-spacing: .06em; color: var(--text-dim); white-space: nowrap;
+}
+.app-actions-divider { width: 1px; height: 32px; background: var(--border); }
+
+/* Header disconnect icon — mobile only (shown in the media query). */
+.disconnect-mobile {
+  display: none; flex-shrink: 0;
+  width: 52px; height: 52px; border-radius: 50%;
+  border: 2px solid #fff; background: none; color: #fff;
+  align-items: center; justify-content: center; cursor: pointer;
+}
+
+/* Section headers ("Users" / "Chat"). */
+.section-head, .chat-desktop-head {
+  display: flex; align-items: baseline; gap: 12px; padding: 10px 38px 16px;
+}
+.section-head h2, .chat-desktop-head h2 {
+  margin: 0; font-size: 1rem; font-weight: 600; text-transform: uppercase; color: #fff;
+}
+.user-count { font-size: 1rem; font-weight: 600; color: var(--accent); }
+
+/* ---- Users (tile grid) ---- */
+.users-section {
+  grid-area: users;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
+}
 #user-list {
   list-style: none; flex: 1; overflow-y: auto;
-  padding: 0 10px 8px; display: flex; flex-direction: column; gap: 2px;
+  padding: 0 38px 10px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px; align-content: start;
 }
-#user-list li {
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 10px; border-radius: var(--radius-sm);
-  border: 1px solid transparent; transition: background .12s, border-color .12s;
+.user-tile {
+  height: 120px; padding: 14px;
+  display: flex; flex-direction: column; justify-content: space-between; gap: 12px;
+  overflow: hidden;
+  /* background color assigned per-user in JS (see main.ts colorFor()) */
 }
-.user-avatar {
-  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
-  font-size: .82rem; font-weight: 700; color: #fff;
-  /* background color assigned per-user in JS (see README colorFor()) */
+.user-tile.is-self   { box-shadow: inset 0 0 0 3px var(--accent); }
+.user-tile.is-talking { box-shadow: inset 0 0 0 3px #fff; }   /* talking ring wins over self */
+.user-tile.is-deafened:not(.is-talking) { opacity: .5; }
+
+.tile-top { display: flex; justify-content: space-between; align-items: flex-start; }
+.tile-initial { font-size: 1.5rem; font-weight: 300; color: rgba(255,255,255,.9); line-height: 1; }
+.tile-status { display: flex; gap: 8px; align-items: center; }
+.tile-bottom .user-name {
+  font-size: 1rem; font-weight: 600; color: #fff;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-#user-list li .user-name {
-  flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: .9rem; font-weight: 500; color: var(--text-dim);
-}
-#user-list li.is-self .user-name { color: #fff; }
-#user-list li.is-self .user-name::after {
+.user-tile.is-self .user-name::after {
   content: "you"; display: block;
-  font-size: .66rem; font-weight: 400; color: var(--faint);
+  font-size: .68rem; font-weight: 400; letter-spacing: .14em;
+  text-transform: uppercase; color: rgba(255,255,255,.7);
 }
 
-/* status icons — swap the emoji spans for inline SVG (see README) */
-#user-list li .icon-muted,
-#user-list li .icon-deafened { display: none; flex-shrink: 0; line-height: 0; }
-#user-list li .icon-muted svg    { stroke: var(--accent); }
-#user-list li .icon-deafened svg { stroke: #e0879a; }
-#user-list li.is-muted    .icon-muted    { display: inline-flex; }
-#user-list li.is-deafened .icon-deafened { display: inline-flex; }
+/* status glyphs — shown via the is-muted / is-deafened classes toggled in JS */
+.tile-status .icon-muted,
+.tile-status .icon-deafened { display: none; line-height: 0; }
+.tile-status .icon-muted svg,
+.tile-status .icon-deafened svg { stroke: #fff; width: 18px; height: 18px; }
+.user-tile.is-muted    .icon-muted    { display: inline-flex; }
+.user-tile.is-deafened .icon-deafened { display: inline-flex; }
 
-/* talking equalizer bars (JS toggles li.is-talking; bars markup in README) */
-.talking-bars { display: none; align-items: flex-end; gap: 2.5px; height: 14px; flex-shrink: 0; }
-.talking-bars span { width: 2.5px; background: var(--green); border-radius: 2px; height: 100%; transform-origin: bottom; animation: bar .8s ease-in-out infinite; }
+/* talking equalizer bars (JS toggles .is-talking) */
+.talking-bars { display: none; align-items: flex-end; gap: 2px; height: 18px; }
+.talking-bars span {
+  width: 3px; background: #fff; height: 100%;
+  transform-origin: bottom; animation: mbar .8s ease-in-out infinite;
+}
 .talking-bars span:nth-child(2) { animation-delay: .2s; }
 .talking-bars span:nth-child(3) { animation-delay: .4s; }
-#user-list li.is-talking {
-  background: rgba(52,211,153,.09);
-  border-color: rgba(52,211,153,.28);
-}
-#user-list li.is-talking .talking-bars { display: flex; }
-#user-list li.is-talking .user-avatar { box-shadow: 0 0 0 2px var(--green); animation: talkpulse 1.6s ease-out infinite; }
-@keyframes bar { 0%,100% { transform: scaleY(.35); } 50% { transform: scaleY(1); } }
-@keyframes talkpulse { 0% { box-shadow: 0 0 0 0 rgba(52,211,153,.45); } 70% { box-shadow: 0 0 0 7px rgba(52,211,153,0); } 100% { box-shadow: 0 0 0 0 rgba(52,211,153,0); } }
+.user-tile.is-talking .talking-bars { display: flex; }
+@keyframes mbar { 0%,100% { transform: scaleY(.3); } 50% { transform: scaleY(1); } }
 
 /* empty state (rendered by JS when the roster is empty) */
 .empty-state {
-  flex: 1; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; text-align: center;
-  padding: 24px 16px; gap: 12px;
+  grid-column: 1 / -1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; padding: 50px 16px; gap: 12px; color: var(--muted);
 }
 .empty-state .empty-icon {
-  width: 46px; height: 46px; border-radius: 50%;
-  background: rgba(148,163,205,.08); border: 1px solid var(--border-strong);
+  width: 58px; height: 58px; border: 2px solid var(--border);
   display: flex; align-items: center; justify-content: center; color: var(--faint);
 }
-.empty-state .empty-title { font-size: .9rem; font-weight: 600; color: #c7cde0; }
-.empty-state .empty-sub   { font-size: .8rem; color: var(--muted); line-height: 1.45; margin-top: 3px; }
+.empty-state .empty-title { font-size: .95rem; font-weight: 600; color: #fff; }
+.empty-state .empty-sub   { font-size: .84rem; color: var(--muted); line-height: 1.45; max-width: 260px; }
 
-/* controls */
-.controls { padding: 12px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-.controls-row { display: flex; gap: 8px; }
-.btn-mute, .btn-deafen {
-  flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px;
-  padding: .6rem; border-radius: var(--radius-sm);
-  background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text-dim);
-  font-size: .82rem; font-weight: 600; cursor: pointer; transition: .15s;
+/* ---- Chat ---- */
+.chat-panel {
+  grid-area: chat;
+  display: flex; flex-direction: column; min-width: 0; min-height: 0;
 }
-.btn-mute svg, .btn-deafen svg { width: 16px; height: 16px; }
-.btn-mute.active, .btn-deafen.active {
-  background: linear-gradient(150deg, var(--accent), var(--accent-2));
-  border-color: var(--accent); color: #fff;
+.sheet-toggle { display: none; }   /* mobile affordance only */
+#chat-messages {
+  flex: 1; overflow-y: auto; padding: 0 38px;
+  display: flex; flex-direction: column; gap: 12px;
 }
-.btn-disconnect {
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  width: 100%; padding: .55rem;
-  background: transparent; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
-  color: var(--muted); font-size: .85rem; font-weight: 600; cursor: pointer; transition: .15s;
+
+.chat-welcome { overflow-x: auto; border-left: 3px solid var(--accent); padding-left: 12px; }
+.chat-welcome pre {
+  margin: 0; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px; line-height: 1.15; color: var(--muted); white-space: pre;
 }
-.btn-disconnect svg { width: 15px; height: 15px; }
-.btn-disconnect:hover { color: #f5859c; border-color: rgba(233,69,96,.5); background: rgba(233,69,96,.08); }
-/* Icon-only disconnect in the header — mobile only (shown in the media query). */
-#disconnect-btn-mobile { display: none; }
 
-/* chat panel */
-.chat-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); overflow: hidden; }
-/* The sheet grip/header is a mobile affordance only; hidden on desktop where
-   the chat panel is a plain right-hand column (revealed in the mobile query). */
-.sheet-toggle { display: none; }
-#chat-messages { flex: 1; overflow-y: auto; padding: 20px 22px; display: flex; flex-direction: column; gap: 9px; }
+.message { display: flex; gap: 11px; font-size: .95rem; line-height: 1.4; }
+.message .timestamp { font-size: .72rem; color: #5a5a5a; flex-shrink: 0; }
+.message .from { font-weight: 600; flex-shrink: 0; color: var(--accent); /* overridden per-user inline */ }
+.message .body { color: #eaeaea; }
+.chat-event { color: var(--faint); }
+.chat-event .timestamp { color: #5a5a5a; }
 
-.chat-welcome {
-  margin: 2px 0 8px; padding: 14px 16px;
-  background: rgba(148,163,205,.05); border: 1px solid var(--border); border-radius: var(--radius);
-  overflow-x: auto;
-}
-.chat-welcome pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; line-height: 1.15; color: #7f89a8; white-space: pre; }
-
-.message { display: flex; align-items: baseline; gap: 8px; font-size: .92rem; line-height: 1.45; }
-.message .timestamp { font-size: .72rem; color: #5f6884; flex-shrink: 0; }
-.message .from { font-weight: 700; flex-shrink: 0; color: var(--accent); /* overridden per-user inline: color = that user's avatar color */ }
-.message .body { color: var(--text-dim); }
-.chat-event { color: #727c99; font-style: italic; }
-.chat-event .timestamp { font-style: normal; }
-
-#chat-form { display: flex; gap: 10px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--panel); }
+#chat-form { display: flex; padding: 20px 38px; }
 #chat-input {
-  flex: 1; padding: .62rem .9rem;
-  background: var(--input); border: 1px solid var(--border-strong); border-radius: var(--radius);
-  color: var(--text); font-size: .92rem; outline: none; transition: border-color .15s, box-shadow .15s;
+  flex: 1; padding: .6rem .7rem;
+  background: #fff; border: 2px solid #fff; border-radius: 0;
+  color: #000; font-size: .95rem; font-family: inherit; outline: none; transition: border-color .12s;
 }
-#chat-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+#chat-input:focus { border-color: var(--accent); }
 #chat-form button {
-  padding: 0 1.2rem; display: flex; align-items: center; gap: 6px;
-  background: linear-gradient(150deg, var(--accent), var(--accent-2));
-  border: none; border-radius: var(--radius); color: #fff; font-size: .9rem; font-weight: 700; cursor: pointer;
+  width: 58px; background: var(--accent); border: none; border-radius: 0;
+  color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background .12s;
 }
-#chat-form button:hover { filter: brightness(1.08); }
-#chat-form button svg { width: 15px; height: 15px; }
+#chat-form button:hover { background: var(--accent-hover); }
 
 /* ==================== MOBILE ==================== */
-/* Layout goal (per product): user list is PERSISTENT and prioritised; chat
-   collapses into a bottom sheet that shows the latest line, and expands
-   WITHOUT covering the mute/deafen controls. */
+/* Roster stays persistent and prioritised; voice controls become a centred
+   bar; chat collapses into a bottom sheet that never covers the controls. */
 @media (max-width: 640px) {
-  body { display: block; }
-
-  .room-layout { flex-direction: column; height: 100dvh; }
-
-  .sidebar {
-    width: 100%; flex: 1; min-height: 0;
-    border-right: none;
-    /* controls + sheet are moved out of the sidebar on mobile — see README markup */
+  .room-layout {
+    display: flex; flex-direction: column;
+    height: 100dvh; overflow: hidden;
   }
-  .sidebar-header { padding: 14px 16px; }
-  #user-list { padding: 0 12px 12px; }
-  #user-list li { padding: 11px 12px; gap: 12px; }
-  .user-avatar { width: 38px; height: 38px; font-size: .95rem; }
 
-  /* bottom controls bar */
-  .controls {
-    flex-direction: row; flex-shrink: 0;
-    padding: 10px 14px; background: var(--panel);
-  }
-  .controls .btn-disconnect { display: none; } /* disconnect moves to header icon on mobile */
-  #disconnect-btn-mobile {
-    display: inline-flex; margin-left: auto; flex-shrink: 0;
-    width: 38px; height: 38px; padding: 0;
-  }
-  .controls-row { flex: 1; } /* fill the bar so the two buttons split 50/50 */
-  .btn-mute, .btn-deafen { padding: .75rem; font-size: .88rem; font-weight: 700; border-radius: 13px; }
-  .btn-mute svg, .btn-deafen svg { width: 18px; height: 18px; }
+  .app-bar { order: 0; padding: 26px 24px 12px; align-items: flex-start; }
+  .app-brand .brand-eyebrow { font-size: .68rem; }
+  .room-title { font-size: 2rem; }
+  .disconnect-mobile { display: flex; }
 
-  /* chat as a bottom sheet, in normal flow so it never overlays .controls */
-  .chat-sheet {
-    flex: none; /* size to content when collapsed, to height:56% when open — never grow */
-    background: linear-gradient(180deg, #1a2138, #161c31);
-    border-top: 1px solid var(--border-strong);
-    border-radius: 18px 18px 0 0;
-    box-shadow: 0 -12px 40px -12px rgba(0,0,0,.5);
-    display: flex; flex-direction: column; overflow: hidden;
-    transition: height .28s ease;
+  /* voice controls: static, centred bar between roster and sheet */
+  .app-actions {
+    position: static; order: 2;
+    justify-content: center; gap: 55px;
+    padding: 14px; background: #151515; border-top: 1px solid #1f1f1f;
   }
-  .chat-sheet.open { height: 56%; }
+  .app-actions .ctrl-btn { flex-direction: column; gap: 6px; }
+  .app-actions .ctrl-circle { width: 68px; height: 68px; }
+  .app-actions-divider, .ctrl-btn-disconnect { display: none; }  /* disconnect lives in the header on mobile */
+
+  /* roster fills the space; its "Users" heading stays at the top of the
+     section (do not reorder .section-head — it's a child of .users-section) */
+  .users-section { order: 1; flex: 1 1 auto; min-height: 0; padding-left: 0; }
+  .section-head { padding: 6px 24px 12px; }
+  #user-list {
+    grid-template-columns: 1fr 1fr; gap: 10px;
+    padding: 0 24px 16px;
+  }
+  .tile-initial { font-size: 2rem; font-weight: 200; color: rgba(255,255,255,.92); }
+
+  /* chat as a bottom sheet, in normal flow so it never overlays the controls */
+  .chat-panel {
+    order: 3; flex: none;
+    background: #0c0c0c; overflow: hidden;
+    display: flex; flex-direction: column;
+    transition: height .25s ease;
+  }
+  .chat-panel.open { height: 56%; }
+  .chat-desktop-head { display: none; }
 
   .sheet-toggle {
-    display: block; width: 100%; padding: 12px 16px; cursor: pointer;
-    background: none; border: none; color: inherit; font: inherit; text-align: left;
+    display: block; width: 100%; padding: 14px 24px; cursor: pointer;
+    background: none; border: none; border-top: 2px solid var(--accent);
+    color: inherit; font: inherit; text-align: left; flex-shrink: 0;
   }
-  .sheet-head { display: flex; align-items: center; gap: 8px; }
-  .sheet-head .sheet-title { font-size: .82rem; font-weight: 700; color: #c7cde0; }
-  .sheet-latest { flex: 1; min-width: 0; font-size: .82rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .chat-sheet.open .sheet-latest { display: none; }
-  .sheet-head .sheet-chevron { flex-shrink: 0; margin-left: auto; color: var(--muted); transition: transform .28s ease; }
-  .chat-sheet.open .sheet-chevron { transform: rotate(180deg); }
+  .sheet-head { display: flex; align-items: center; gap: 10px; }
+  .sheet-title { font-size: 1rem; font-weight: 600; text-transform: uppercase; color: #fff; }
+  .sheet-latest {
+    flex: 1; min-width: 0; font-size: .84rem; color: #8a8a8a;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .chat-panel.open .sheet-latest { display: none; }
+  .sheet-chevron { flex-shrink: 0; margin-left: auto; transition: transform .25s ease; }
+  .chat-panel.open .sheet-chevron { transform: rotate(180deg); }
 
-  /* on mobile the message list + form live inside .chat-sheet, shown only when open */
-  .chat-sheet:not(.open) #chat-messages,
-  .chat-sheet:not(.open) #chat-form { display: none; }
-  .chat-sheet #chat-messages { padding: 6px 16px 12px; border-top: 1px solid var(--border); }
-  .chat-sheet #chat-form { padding: 10px 14px; }
-  .chat-welcome pre { font-size: 8.5px; }
+  /* message list + form appear only when the sheet is open */
+  .chat-panel:not(.open) #chat-messages,
+  .chat-panel:not(.open) #chat-form { display: none; }
+  .chat-panel #chat-messages { padding: 4px 24px 12px; }
+  .chat-panel #chat-form { padding: 12px 24px 16px; }
+  .chat-panel #chat-input { font-size: .9rem; padding: .55rem .7rem; }
+  .chat-panel #chat-form button { width: 52px; }
+  .chat-welcome pre { font-size: 10px; }
 }

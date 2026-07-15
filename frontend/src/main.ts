@@ -17,9 +17,8 @@ const loginError = document.getElementById('login-error')!
 const connectBtn = document.getElementById('connect-btn') as HTMLButtonElement
 const muteBtn = document.getElementById('mute-btn') as HTMLButtonElement
 const muteBtnIcon = muteBtn.querySelector('.btn-icon') as HTMLSpanElement
-const muteBtnLabel = muteBtn.querySelector('.btn-label') as HTMLSpanElement
 const deafenBtn = document.getElementById('deafen-btn') as HTMLButtonElement
-const deafenBtnLabel = deafenBtn.querySelector('.btn-label') as HTMLSpanElement
+const deafenBtnIcon = deafenBtn.querySelector('.btn-icon') as HTMLSpanElement
 const disconnectBtn = document.getElementById('disconnect-btn') as HTMLButtonElement
 const disconnectBtnMobile = document.getElementById('disconnect-btn-mobile') as HTMLButtonElement
 const userList = document.getElementById('user-list')!
@@ -41,6 +40,11 @@ const MIC_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
 const MIC_OFF_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
+// Header deafen glyph — headphones, crossed out when deafened.
+const DEAFEN_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 18 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/></svg>'
+const DEAFEN_OFF_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><line x1="2" x2="22" y1="2" y2="22"/><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 13.4-7.83"/><path d="M20.6 8.4A9 9 0 0 1 21 12v5.5"/><path d="M18 21a2 2 0 0 1-2-2v-3"/></svg>'
 // User-list status glyphs — stroke color comes from CSS (.icon-muted / .icon-deafened).
 const USER_MIC_OFF_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="15" height="15"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>'
@@ -232,8 +236,9 @@ loginForm.addEventListener('submit', (e) => {
 
 // --- Mute ---
 function renderMuteButton(): void {
+  // Icon + accent fill convey state; the label stays "Mute" so the button
+  // never changes width and shifts the app-bar layout.
   muteBtnIcon.innerHTML = muted ? MIC_OFF_SVG : MIC_SVG
-  muteBtnLabel.textContent = muted ? 'Unmute' : 'Mute'
   muteBtn.classList.toggle('active', muted)
 }
 
@@ -249,9 +254,12 @@ muteBtn.addEventListener('click', () => applyMute(!muted))
 
 // --- Deafen (local only: silences remote playback + forces mute) ---
 function renderDeafenButton(): void {
-  deafenBtnLabel.textContent = deafened ? 'Undeafen' : 'Deafen'
+  // Icon (crossed-out headphones) + accent fill convey state; the label stays
+  // "Deafen" to avoid layout shift.
+  deafenBtnIcon.innerHTML = deafened ? DEAFEN_OFF_SVG : DEAFEN_SVG
   deafenBtn.classList.toggle('active', deafened)
 }
+renderDeafenButton()
 
 deafenBtn.addEventListener('click', () => {
   deafened = !deafened
@@ -337,38 +345,53 @@ function setUserList(users: UserInfo[]): void {
 
 function addUser(user: UserInfo): void {
   if (document.getElementById(`user-${CSS.escape(user.name)}`)) return
+  // A user is a solid colored Metro tile: initial + status glyphs on top,
+  // name (and a "you" caption for self, via CSS) along the bottom.
   const li = document.createElement('li')
   li.id = `user-${CSS.escape(user.name)}`
+  li.classList.add('user-tile')
   if (user.name === currentUsername) li.classList.add('is-self')
+  li.style.background = colorFor(user.name)
 
-  const avatar = document.createElement('div')
-  avatar.classList.add('user-avatar')
-  avatar.style.background = colorFor(user.name)
-  avatar.textContent = user.name.charAt(0).toUpperCase()
-  li.appendChild(avatar)
+  const top = document.createElement('div')
+  top.classList.add('tile-top')
 
-  const nameSpan = document.createElement('span')
-  nameSpan.classList.add('user-name')
-  nameSpan.textContent = user.name
-  li.appendChild(nameSpan)
+  const initial = document.createElement('span')
+  initial.classList.add('tile-initial')
+  initial.textContent = user.name.charAt(0).toUpperCase()
+  top.appendChild(initial)
+
+  const status = document.createElement('div')
+  status.classList.add('tile-status')
 
   // Talking equalizer bars — shown via CSS when li has .is-talking.
   const bars = document.createElement('span')
   bars.classList.add('talking-bars')
   bars.innerHTML = '<span></span><span></span><span></span>'
-  li.appendChild(bars)
+  status.appendChild(bars)
 
   const muteIcon = document.createElement('span')
   muteIcon.classList.add('icon-muted')
   muteIcon.title = 'Muted'
   muteIcon.innerHTML = USER_MIC_OFF_SVG
-  li.appendChild(muteIcon)
+  status.appendChild(muteIcon)
 
   const deafIcon = document.createElement('span')
   deafIcon.classList.add('icon-deafened')
   deafIcon.title = 'Deafened'
   deafIcon.innerHTML = USER_DEAF_SVG
-  li.appendChild(deafIcon)
+  status.appendChild(deafIcon)
+
+  top.appendChild(status)
+  li.appendChild(top)
+
+  const bottom = document.createElement('div')
+  bottom.classList.add('tile-bottom')
+  const nameSpan = document.createElement('span')
+  nameSpan.classList.add('user-name')
+  nameSpan.textContent = user.name
+  bottom.appendChild(nameSpan)
+  li.appendChild(bottom)
 
   userList.appendChild(li)
   applyUserState(li, user)

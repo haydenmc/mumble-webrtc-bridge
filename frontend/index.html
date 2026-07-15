@@ -7,56 +7,60 @@
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
-  <!-- Reusable mic glyph is inlined where needed (login brand-mark, sidebar). -->
 
   <!-- Login view -->
   <div id="view-login" class="view">
-    <div class="card">
-      <div class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
-      </div>
-      <h1>{{.Title}}</h1>
-      {{if .About}}<p class="about">{{.About}}</p>{{end}}
+    <div class="login-inner">
+      <div class="brand-eyebrow">mumble</div>
+      <h1 class="login-title">{{.Title}}</h1>
+      <p class="login-sub">{{if .About}}{{.About}}{{else}}voice &amp; text, straight from your browser{{end}}</p>
+
       <form id="login-form">
         <label for="username">Username</label>
         <input id="username" type="text" placeholder="YourName" autocomplete="username" required />
         <label for="password">Server Password</label>
         <input id="password" type="password" placeholder="••••••••" autocomplete="current-password" />
         <p id="login-error" class="error hidden"></p>
+
         <details class="advanced-options">
-          <summary>Advanced options</summary>
+          <summary>advanced options</summary>
           <label class="checkbox-label">
             <input type="checkbox" id="sounds-toggle" checked />
-            Enable sounds
-          </label>
-          <label for="bitrate-select">Opus encode bitrate</label>
-          <select id="bitrate-select">
-            <option value="24000">24 kbps</option>
-            <option value="32000">32 kbps</option>
-            <option value="48000">48 kbps</option>
-            <option value="64000">64 kbps</option>
-            <option value="96000" selected>96 kbps</option>
-            <option value="128000">128 kbps</option>
-          </select>
-          <label class="checkbox-label">
-            <input type="checkbox" id="low-delay-toggle" checked />
-            Low delay mode
+            <span>Enable sounds</span>
           </label>
           <label class="checkbox-label">
             <input type="checkbox" id="auto-gain-toggle" checked />
-            Auto gain control
+            <span>Auto gain control</span>
           </label>
           <label class="checkbox-label">
             <input type="checkbox" id="echo-cancellation-toggle" checked />
-            Echo cancellation
+            <span>Echo cancellation</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="low-delay-toggle" checked />
+            <span>Low delay mode</span>
           </label>
           <label for="noise-suppression-select">Noise suppression</label>
-          <select id="noise-suppression-select">
-            <option value="rnnoise" selected>RNNoise</option>
-            <option value="browser">Browser</option>
-            <option value="off">Disabled</option>
-          </select>
+          <div class="select-wrap">
+            <select id="noise-suppression-select">
+              <option value="rnnoise" selected>RNNoise</option>
+              <option value="browser">Browser</option>
+              <option value="off">Disabled</option>
+            </select>
+          </div>
+          <label for="bitrate-select">Opus encode bitrate</label>
+          <div class="select-wrap">
+            <select id="bitrate-select">
+              <option value="24000">24 kbps</option>
+              <option value="32000">32 kbps</option>
+              <option value="48000">48 kbps</option>
+              <option value="64000">64 kbps</option>
+              <option value="96000" selected>96 kbps</option>
+              <option value="128000">128 kbps</option>
+            </select>
+          </div>
         </details>
+
         <button type="submit" id="connect-btn">Connect</button>
       </form>
     </div>
@@ -65,63 +69,72 @@
   <!-- Room view -->
   <div id="view-room" class="view hidden">
     <div class="room-layout">
-      <aside class="sidebar">
-        <div class="sidebar-header">
-          <div class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
-          </div>
-          <div style="min-width:0">
-            <h1 class="sidebar-title">{{.Title}}</h1>
-            <div class="conn-status">Connected</div>
-          </div>
-          <!-- mobile-only disconnect (CSS hides the sidebar .btn-disconnect on mobile) -->
-          <button id="disconnect-btn-mobile" class="btn-disconnect" title="Disconnect">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="17" height="17"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
-          </button>
-        </div>
 
-        <h2>Users <span class="user-count" id="user-count">0</span></h2>
-        <!-- main.ts populates #user-list; renders .empty-state inside when empty -->
+      <header class="app-bar">
+        <div class="app-brand">
+          <div class="brand-eyebrow">mumble</div>
+          <h1 class="room-title">{{.Title}}</h1>
+        </div>
+        <!-- mobile-only disconnect (CSS hides on desktop; the labeled one lives in .app-actions) -->
+        <button id="disconnect-btn-mobile" class="disconnect-mobile" title="Disconnect">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+        </button>
+      </header>
+
+      <!-- Voice controls. Desktop: overlaid top-right of the app bar. Mobile: a
+           centred bar in normal flow between the roster and the chat sheet. -->
+      <div class="app-actions">
+        <button id="mute-btn" class="ctrl-btn">
+          <span class="btn-icon ctrl-circle"><!-- JS swaps mic / mic-off svg --></span>
+          <span class="btn-label">Mute</span>
+        </button>
+        <button id="deafen-btn" class="ctrl-btn">
+          <span class="btn-icon ctrl-circle">
+            <!-- JS swaps headphones / crossed-headphones svg -->
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 18 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/></svg>
+          </span>
+          <span class="btn-label">Deafen</span>
+        </button>
+        <div class="app-actions-divider"></div>
+        <button id="disconnect-btn" class="ctrl-btn ctrl-btn-disconnect">
+          <span class="ctrl-circle ctrl-circle-plain">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+          </span>
+          <span class="btn-label">Disconnect</span>
+        </button>
+      </div>
+
+      <section class="users-section">
+        <div class="section-head">
+          <h2>Users</h2>
+          <span class="user-count" id="user-count">0</span>
+        </div>
+        <!-- main.ts populates #user-list with tiles; renders .empty-state inside when empty -->
         <ul id="user-list"></ul>
+      </section>
 
-        <div class="controls">
-          <div class="controls-row">
-            <button id="mute-btn" class="btn-mute">
-              <span class="btn-icon"><!-- JS swaps mic / mic-off svg --></span>
-              <span class="btn-label">Mute</span>
-            </button>
-            <button id="deafen-btn" class="btn-deafen">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 18 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/></svg>
-              <span class="btn-label">Deafen</span>
-            </button>
-          </div>
-          <button id="disconnect-btn" class="btn-disconnect">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
-            Disconnect
-          </button>
-        </div>
-      </aside>
-
-      <!-- On desktop this is the right-hand panel. On mobile CSS turns it into
-           a bottom sheet; toggle .open via the .sheet-toggle handler. -->
+      <!-- On desktop this is the right-hand chat column. On mobile CSS turns it
+           into a bottom sheet; toggle .open via the .sheet-toggle handler. -->
       <main class="chat-panel chat-sheet">
         <button type="button" class="sheet-toggle" id="sheet-toggle" aria-expanded="false">
           <div class="sheet-head">
-            <svg viewBox="0 0 24 24" fill="none" stroke="#8b94b0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
             <span class="sheet-title">Chat</span>
             <span class="sheet-latest" id="sheet-latest"></span>
-            <svg class="sheet-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><polyline points="18 15 12 9 6 15"/></svg>
+            <svg class="sheet-chevron" viewBox="0 0 24 24" fill="none" stroke="#EC008C" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><polyline points="18 15 12 9 6 15"/></svg>
           </div>
         </button>
+        <div class="chat-desktop-head">
+          <h2>Chat</h2>
+        </div>
         <div id="chat-messages"></div>
         <form id="chat-form">
-          <input id="chat-input" type="text" placeholder="Type a message…" autocomplete="off" />
-          <button type="submit">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
-            <span>Send</span>
+          <input id="chat-input" type="text" placeholder="message the room" autocomplete="off" />
+          <button type="submit" title="Send">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
           </button>
         </form>
       </main>
+
     </div>
   </div>
 
