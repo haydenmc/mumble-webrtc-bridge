@@ -176,6 +176,13 @@ func (p *Peer) handleMessage(raw []byte) error {
 			return err
 		}
 		p.handleMute(m.Muted)
+
+	case "deaf":
+		var m deafMsg
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return err
+		}
+		p.handleDeaf(m.Deafened)
 	}
 	return nil
 }
@@ -451,6 +458,20 @@ func (p *Peer) handleMute(muted bool) {
 	}
 	if err := p.mumble.SetSelfMuted(muted); err != nil {
 		log.Printf("peer %s: set self muted: %v", p.id, err)
+	}
+}
+
+// handleDeaf reflects manual (button) deafen to other Mumble clients via the
+// self-deaf flag. Remote audio silencing itself is handled entirely
+// client-side; this only makes the deaf state visible to other Mumble users.
+// The Mumble server also implicitly self-mutes a self-deafened user, which the
+// browser mirrors locally (see setDeafened in the frontend client).
+func (p *Peer) handleDeaf(deafened bool) {
+	if p.mumble == nil {
+		return
+	}
+	if err := p.mumble.SetSelfDeafened(deafened); err != nil {
+		log.Printf("peer %s: set self deafened: %v", p.id, err)
 	}
 }
 
