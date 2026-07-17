@@ -169,11 +169,14 @@ export class MumbleWebRTCClient {
   // audio output, so no client-side mixing code is needed.
   private remoteAudioEls = new Map<string, HTMLAudioElement>()
   private manuallyMuted = false
-  // Local-only deafen: silences every remote <audio> element's playback (and
-  // keeps newly-arriving track slots silenced) without any server signalling,
-  // so other Mumble users don't see us as deafened. Deafening also forces
-  // mute, mirroring a native client.
+  // Deafen: silences every remote <audio> element's playback (and keeps
+  // newly-arriving track slots silenced) for instant local silence, and is
+  // also signalled to the Mumble server (see setDeafened) so other users see
+  // us as deafened. Deafening also forces mute, mirroring a native client.
   private deafened = false
+  // The manual-mute state captured when deafening, restored when un-deafening
+  // (deaf implies mute, but un-deafen must not clobber a pre-existing mute).
+  private muteBeforeDeafen = false
   private micTrack: MediaStreamTrack | null = null
   // The unprocessed hardware capture track, kept separately so cleanup() can
   // stop it: when RNNoise is on, micTrack is the *processed* destination
@@ -478,13 +481,21 @@ export class MumbleWebRTCClient {
     this.updateTransmission()
   }
 
-  // Local-only: mutes/unmutes playback of every remote audio element. Deafening
-  // also forces self-mute (a native client can't be deaf-but-transmitting).
-  // Not signalled to the server, so remote users won't see our deaf state.
+  // Mutes/unmutes playback of every remote audio element and signals self-deaf
+  // to the Mumble server so remote users see our deaf state. Deafening also
+  // forces self-mute (a native client can't be deaf-but-transmitting);
+  // un-deafening restores whatever mute state we had before deafening rather
+  // than blindly unmuting.
   setDeafened(deafened: boolean): void {
     this.deafened = deafened
     for (const el of this.remoteAudioEls.values()) el.muted = deafened
-    if (deafened) this.setMuted(true)
+    this.send({ type: 'deaf', deafened })
+    if (deafened) {
+      this.muteBeforeDeafen = this.manuallyMuted
+      this.setMuted(true)
+    } else {
+      this.setMuted(this.muteBeforeDeafen)
+    }
   }
 
   // Stops audio leaving the browser entirely (rather than just having the

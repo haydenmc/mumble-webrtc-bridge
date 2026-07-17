@@ -259,17 +259,26 @@ function renderDeafenButton(): void {
 }
 renderDeafenButton()
 
+// The Mute-button state captured when deafening, restored when un-deafening so
+// the button reflects the client's own pre-deafen mute state (see setDeafened).
+let muteBeforeDeafen = false
+
 deafenBtn.addEventListener('click', () => {
   deafened = !deafened
   playSound(deafened ? 'deafen' : 'undeafen')
-  client?.setDeafened(deafened) // also mutes remote audio + forces client mute
+  // Mutes remote audio, forces/restores client mute, and signals self-deaf to
+  // the server.
+  client?.setDeafened(deafened)
   renderDeafenButton()
-  // Reflect the forced mute in the UI without re-sending the mute message
-  // (client.setDeafened already muted us server-side).
-  if (deafened && !muted) {
+  // Mirror the forced/restored mute in the UI without re-sending the mute
+  // message (client.setDeafened already signalled it).
+  if (deafened) {
+    muteBeforeDeafen = muted
     muted = true
-    renderMuteButton()
+  } else {
+    muted = muteBeforeDeafen
   }
+  renderMuteButton()
 })
 
 // --- Disconnect ---

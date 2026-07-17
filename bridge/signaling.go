@@ -36,6 +36,11 @@ type muteMsg struct {
 	Muted bool   `json:"muted"`
 }
 
+type deafMsg struct {
+	Type     string `json:"type"`
+	Deafened bool   `json:"deafened"`
+}
+
 type userInfo struct {
 	Name         string `json:"name"`
 	Muted        bool   `json:"muted"`
