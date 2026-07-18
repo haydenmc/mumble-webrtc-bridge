@@ -18,11 +18,15 @@ const VAD_ASSET_PATH = '/vad/'
 // the redemption window of sub-negative-threshold frames.
 const VAD_FRAME_SAMPLES = 512
 const VAD_SAMPLE_RATE = 16000
-// Silero speech-probability thresholds (0..1). Library defaults are 0.3/0.25;
-// raised a little to keep the gate from opening on borderline non-speech, with
-// the usual ~0.15 gap between open and close for hysteresis. Tune by ear.
-const VAD_POSITIVE_THRESHOLD = 0.5
-const VAD_NEGATIVE_THRESHOLD = 0.35
+// Silero speech-probability thresholds (0..1). The positive threshold is the
+// probability the *first* frame of a word must reach for onSpeechStart to fire
+// and open the gate, so it directly controls both sensitivity to short/soft
+// words and how promptly the onset is detected (a high value delays the open
+// past what the transmit delay line can cover, clipping the word). Kept at the
+// library's sensitive default rather than raised — for a comms app, letting an
+// occasional non-speech blip through beats swallowing quiet words. Tune by ear.
+const VAD_POSITIVE_THRESHOLD = 0.3
+const VAD_NEGATIVE_THRESHOLD = 0.2
 // Hang time after speech drops before closing the gate — mirrors the old RMS
 // gate's 500ms so brief pauses (a breath, a soft consonant) don't chop a
 // sentence into fragments. vad-web converts this to whole frames internally.
