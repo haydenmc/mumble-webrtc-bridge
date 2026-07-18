@@ -32,6 +32,14 @@ const VAD_NEGATIVE_THRESHOLD = 0.2
 // sentence into fragments. vad-web converts this to whole frames internally.
 const VAD_REDEMPTION_MS = 500
 
+// Ceiling on how long we'll wait for the Silero VAD (onnxruntime-web's WASM
+// init + first model load) before giving up and falling back to the RMS
+// loudness gate. Some browsers never reject or resolve that promise at all —
+// e.g. GrapheneOS's Vanadium, which disables the JS JIT by default, has been
+// observed to leave WASM compilation stuck indefinitely — and without this
+// timeout the whole join flow would hang forever waiting on it.
+const VAD_INIT_TIMEOUT_MS = 15_000
+
 // Onset-protection delay, applied to the transmit path only (never to the
 // signal the VAD analyzes). Derived from what Silero actually needs rather
 // than hard-coded: an onset is detectable at worst one full 512/16000 = 32ms
@@ -48,7 +56,16 @@ const TRANSMIT_DELAY_S = VAD_FRAME_SAMPLES / VAD_SAMPLE_RATE + 0.012 // ~44ms
 // fails to load: RMS audio level against a fixed threshold. Cruder — any loud
 // sound trips it, not just speech — but has zero model dependency, so it keeps
 // voice activation working when the VAD assets are unavailable.
-const LOUDNESS_THRESHOLD = 0.01 // RMS of samples in [-1, 1]; tune by ear
+// Default RMS threshold (samples in [-1, 1]) — user-adjustable via the
+// `loudnessThreshold` constructor option so a too-sensitive fallback gate
+// (see issue #9) can be tuned without a rebuild. Only takes effect while the
+// RMS fallback gate is actually active (see startLoudnessGate).
+export const DEFAULT_LOUDNESS_THRESHOLD = 0.01
+// Bounds for the user-configurable threshold — keeps a bad saved/URL value
+// from producing a gate that's either permanently open (near 0) or can
+// never open (near 1).
+export const MIN_LOUDNESS_THRESHOLD = 0.001
+export const MAX_LOUDNESS_THRESHOLD = 0.2
 // How long to keep transmitting after the last loud sample before gating
 // closed again — avoids chopping speech into fragments at every brief dip
 // below threshold (a pause for breath, a soft consonant).
@@ -154,6 +171,28 @@ function applyOpusOptions(sdp: string, bitrateBps: number, lowDelay: boolean): s
     .join('')
 }
 
+// Races `promise` against a timeout, so a promise that never settles (rather
+// than one that rejects) can still be recovered from. The timeout is a
+// terminal error: if `promise` later settles it's ignored by this race, but
+// callers who need to release resources on it (e.g. destroying an object
+// that showed up late) should chain their own handler off the original
+// promise, not this one.
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
+
 export interface UserInfo {
   name: string
   muted: boolean
@@ -243,7 +282,18 @@ export class MumbleWebRTCClient {
     private noiseSuppressionMode: NoiseSuppressionMode = 'rnnoise',
     private autoGainControl: boolean = true,
     private echoCancellation: boolean = true,
-  ) {}
+    private joinMuted: boolean = false,
+    private loudnessThreshold: number = DEFAULT_LOUDNESS_THRESHOLD,
+  ) {
+    // Gate transmission from construction time, before connect() even starts
+    // capturing the microphone, so a "join muted" request never leaks audio
+    // during connection setup.
+    this.manuallyMuted = joinMuted
+    this.loudnessThreshold = Math.min(
+      MAX_LOUDNESS_THRESHOLD,
+      Math.max(MIN_LOUDNESS_THRESHOLD, loudnessThreshold),
+    )
+  }
 
   connect(username: string, password: string): void {
     this.username = username
@@ -275,6 +325,7 @@ export class MumbleWebRTCClient {
     switch (msg.type) {
       case 'connected':
         await this.startWebRTC()
+        if (this.joinMuted) this.setMuted(true)
         this.events.onConnected()
         break
 
@@ -511,39 +562,48 @@ export class MumbleWebRTCClient {
   // speech decision leads the audio actually being sent. If the model or its
   // worklet can't load, falls back to the RMS loudness gate on `fallbackTap`.
   private async startVAD(rawStream: MediaStream, fallbackTap: AudioNode): Promise<void> {
+    const vadPromise = MicVAD.new({
+      model: 'v5',
+      baseAssetPath: VAD_ASSET_PATH,
+      onnxWASMBasePath: VAD_ASSET_PATH,
+      audioContext: this.audioCtx!,
+      processorType: 'AudioWorklet',
+      startOnLoad: true,
+      // Reuse our existing capture stream instead of letting vad-web open
+      // its own getUserMedia. pauseStream must be a no-op: its default stops
+      // the stream's tracks, which would kill the shared microphone.
+      getStream: async () => rawStream,
+      pauseStream: async () => {},
+      resumeStream: async () => rawStream,
+      positiveSpeechThreshold: VAD_POSITIVE_THRESHOLD,
+      negativeSpeechThreshold: VAD_NEGATIVE_THRESHOLD,
+      redemptionMs: VAD_REDEMPTION_MS,
+      // We gate a live track; the pre-speech pad buffer vad-web would
+      // otherwise assemble is dead weight here.
+      preSpeechPadMs: 0,
+      // Open the gate on the very first positive frame (onSpeechStart) and
+      // always close it on onSpeechEnd — a nonzero minimum would suppress
+      // onSpeechEnd for short segments and route them to onVADMisfire
+      // instead, leaving the gate stuck open.
+      minSpeechMs: 0,
+      submitUserSpeechOnPause: false,
+      onSpeechStart: () => this.setGateOpen(true),
+      onSpeechEnd: () => this.setGateOpen(false),
+      onVADMisfire: () => this.setGateOpen(false),
+    })
     try {
-      this.vad = await MicVAD.new({
-        model: 'v5',
-        baseAssetPath: VAD_ASSET_PATH,
-        onnxWASMBasePath: VAD_ASSET_PATH,
-        audioContext: this.audioCtx!,
-        processorType: 'AudioWorklet',
-        startOnLoad: true,
-        // Reuse our existing capture stream instead of letting vad-web open
-        // its own getUserMedia. pauseStream must be a no-op: its default stops
-        // the stream's tracks, which would kill the shared microphone.
-        getStream: async () => rawStream,
-        pauseStream: async () => {},
-        resumeStream: async () => rawStream,
-        positiveSpeechThreshold: VAD_POSITIVE_THRESHOLD,
-        negativeSpeechThreshold: VAD_NEGATIVE_THRESHOLD,
-        redemptionMs: VAD_REDEMPTION_MS,
-        // We gate a live track; the pre-speech pad buffer vad-web would
-        // otherwise assemble is dead weight here.
-        preSpeechPadMs: 0,
-        // Open the gate on the very first positive frame (onSpeechStart) and
-        // always close it on onSpeechEnd — a nonzero minimum would suppress
-        // onSpeechEnd for short segments and route them to onVADMisfire
-        // instead, leaving the gate stuck open.
-        minSpeechMs: 0,
-        submitUserSpeechOnPause: false,
-        onSpeechStart: () => this.setGateOpen(true),
-        onSpeechEnd: () => this.setGateOpen(false),
-        onVADMisfire: () => this.setGateOpen(false),
-      })
+      this.vad = await withTimeout(
+        vadPromise,
+        VAD_INIT_TIMEOUT_MS,
+        `Silero VAD init did not settle within ${VAD_INIT_TIMEOUT_MS}ms`,
+      )
     } catch (err) {
       console.warn('Silero VAD unavailable, falling back to RMS loudness gate', err)
       this.vad = null
+      // If MicVAD.new() was merely slow rather than truly stuck, it may still
+      // resolve after we've already fallen back — destroy it then rather
+      // than leaving a second, unused gate (and its worklet) running.
+      void vadPromise.then((vad) => vad.destroy()).catch(() => {})
       await this.startLoudnessGate(fallbackTap)
     }
   }
@@ -565,7 +625,7 @@ export class MumbleWebRTCClient {
     tap.connect(this.loudnessNode)
     this.loudnessNode.port.onmessage = (evt: MessageEvent<number>) => {
       const rms = evt.data
-      if (rms >= LOUDNESS_THRESHOLD) {
+      if (rms >= this.loudnessThreshold) {
         if (this.loudnessSilenceTimer !== null) {
           clearTimeout(this.loudnessSilenceTimer)
           this.loudnessSilenceTimer = null
@@ -597,20 +657,26 @@ export class MumbleWebRTCClient {
   }
 
   // Mutes/unmutes playback of every remote audio element and signals self-deaf
-  // to the Mumble server so remote users see our deaf state. Deafening also
-  // forces self-mute (a native client can't be deaf-but-transmitting);
-  // un-deafening restores whatever mute state we had before deafening rather
-  // than blindly unmuting.
+  // (plus the resulting self-mute) to the Mumble server in a single message,
+  // so other users see our deaf state. Deafening also forces self-mute (a
+  // native client can't be deaf-but-transmitting); un-deafening restores
+  // whatever mute state we had before deafening rather than blindly
+  // unmuting. The mute is folded into the same 'deaf' message (rather than
+  // calling setMuted separately) so the bridge sends one combined UserState
+  // to the Mumble server instead of two — sending self-deaf and self-mute as
+  // separate packets causes some servers to broadcast the "is now muted and
+  // deafened" notification to other clients twice.
   setDeafened(deafened: boolean): void {
     this.deafened = deafened
     for (const el of this.remoteAudioEls.values()) el.muted = deafened
-    this.send({ type: 'deaf', deafened })
     if (deafened) {
       this.muteBeforeDeafen = this.manuallyMuted
-      this.setMuted(true)
+      this.manuallyMuted = true
     } else {
-      this.setMuted(this.muteBeforeDeafen)
+      this.manuallyMuted = this.muteBeforeDeafen
     }
+    this.send({ type: 'deaf', deafened, muted: this.manuallyMuted })
+    this.updateTransmission()
   }
 
   // Stops audio leaving the browser entirely (rather than just having the
