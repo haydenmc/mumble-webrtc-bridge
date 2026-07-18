@@ -1,3 +1,4 @@
+import { MicVAD } from '@ricky0123/vad-web'
 import { NoiseSuppressorWorklet_Name } from '@timephy/rnnoise-wasm'
 import NoiseSuppressorWorkletUrl from '@timephy/rnnoise-wasm/NoiseSuppressorWorklet?worker&url'
 
@@ -6,12 +7,47 @@ import NoiseSuppressorWorkletUrl from '@timephy/rnnoise-wasm/NoiseSuppressorWork
 // and dynamically relays whichever sessions are talking onto them.
 const REMOTE_SLOTS = 5
 
-// Naive loudness-based transmission gate: no VAD model, just RMS audio
-// level compared to a fixed threshold. Trades accuracy (any loud sound
-// triggers it — a knock, a cough, typing — not just speech) for zero
-// inference latency, zero model weight/dependency, and a much simpler
-// implementation. A real VAD is a possible future upgrade; deliberately
-// not doing that here.
+// Primary transmission gate: the Silero v5 neural VAD (via @ricky0123/vad-web),
+// which distinguishes speech from other loud sounds (knocks, typing, coughs)
+// far better than a bare level threshold. It analyzes the *raw* mic signal
+// (pre-RNNoise) so denoising can't erase the onset it keys off. Model and
+// runtime assets are served from /vad/ (vendored by scripts/copy-vad-assets.mjs).
+const VAD_ASSET_PATH = '/vad/'
+// Silero v5 consumes 512-sample frames at 16kHz. onSpeechStart fires as soon
+// as the first frame crosses the positive threshold; onSpeechEnd fires after
+// the redemption window of sub-negative-threshold frames.
+const VAD_FRAME_SAMPLES = 512
+const VAD_SAMPLE_RATE = 16000
+// Silero speech-probability thresholds (0..1). The positive threshold is the
+// probability the *first* frame of a word must reach for onSpeechStart to fire
+// and open the gate, so it directly controls both sensitivity to short/soft
+// words and how promptly the onset is detected (a high value delays the open
+// past what the transmit delay line can cover, clipping the word). Kept at the
+// library's sensitive default rather than raised — for a comms app, letting an
+// occasional non-speech blip through beats swallowing quiet words. Tune by ear.
+const VAD_POSITIVE_THRESHOLD = 0.3
+const VAD_NEGATIVE_THRESHOLD = 0.2
+// Hang time after speech drops before closing the gate — mirrors the old RMS
+// gate's 500ms so brief pauses (a breath, a soft consonant) don't chop a
+// sentence into fragments. vad-web converts this to whole frames internally.
+const VAD_REDEMPTION_MS = 500
+
+// Onset-protection delay, applied to the transmit path only (never to the
+// signal the VAD analyzes). Derived from what Silero actually needs rather
+// than hard-coded: an onset is detectable at worst one full 512/16000 = 32ms
+// frame after it begins, so delaying the transmitted audio by that frame plus
+// a small margin (inference, worklet→main-thread messaging, replaceTrack
+// settling) lets the gate open before the first phoneme reaches the sender —
+// no clipped word starts. Fixed for the session: changing DelayNode.delayTime
+// live glitches audibly, so there's no runtime adaptation. The one onset this
+// can't cover is the rare case where the first frame scores below threshold
+// and only the second (~64ms in) trips it; no sub-50ms delay could.
+const TRANSMIT_DELAY_S = VAD_FRAME_SAMPLES / VAD_SAMPLE_RATE + 0.012 // ~44ms
+
+// Fallback transmission gate, used only when the Silero model or its worklet
+// fails to load: RMS audio level against a fixed threshold. Cruder — any loud
+// sound trips it, not just speech — but has zero model dependency, so it keeps
+// voice activation working when the VAD assets are unavailable.
 const LOUDNESS_THRESHOLD = 0.01 // RMS of samples in [-1, 1]; tune by ear
 // How long to keep transmitting after the last loud sample before gating
 // closed again — avoids chopping speech into fragments at every brief dip
@@ -183,11 +219,17 @@ export class MumbleWebRTCClient {
   // track, whose stop() does not release the microphone.
   private rawMicTrack: MediaStreamTrack | null = null
   private rnnoiseNode: AudioWorkletNode | null = null
+  // Fixed onset-protection delay on the transmit path (see TRANSMIT_DELAY_S).
+  private delayNode: DelayNode | null = null
   private audioSender: RTCRtpSender | null = null
   private audioCtx: AudioContext | null = null
+  // Silero VAD, the primary transmit gate. Null when it failed to load and the
+  // RMS loudness fallback (loudnessNode) is driving the gate instead.
+  private vad: MicVAD | null = null
   private loudnessNode: AudioWorkletNode | null = null
   private loudnessSilenceTimer: number | null = null
-  private loudEnough = false
+  // Whether the active gate (VAD or RMS fallback) currently detects speech.
+  private gateOpen = false
   private username = ''
   private selfTalking = false
 
@@ -383,13 +425,18 @@ export class MumbleWebRTCClient {
     void this.audioCtx.resume()
     const micSource = this.audioCtx.createMediaStreamSource(stream)
 
-    // Route the mic through RNNoise into a MediaStreamAudioDestinationNode
-    // and send that destination's track. Adds ~13-16ms latency (10ms RNNoise
-    // frame buffering plus a render quantum or two). On any failure, fall
-    // back to sending the raw mic track unprocessed.
-    let sendTrack = micTrack
-    let sendStream = stream
-    let loudnessTap: AudioNode = micSource
+    // Build the send graph. Every noise-suppression mode routes through a
+    // MediaStreamAudioDestinationNode now — not just 'rnnoise' — because the
+    // onset-protection DelayNode (see below) has to live inside the audio
+    // graph, so we can no longer shortcut 'browser'/'off' by sending the raw
+    // capture track. Chain: micSource → [RNNoise] → delay → dest, and we send
+    // dest's track.
+    //
+    //   RNNoise sits *before* the delay so the RMS fallback gate can tap the
+    //   denoised-but-undelayed signal (rnnoiseNode) and keep its decision
+    //   lead. Latency: ~13-16ms for RNNoise (10ms frame + a quantum or two)
+    //   when enabled, plus TRANSMIT_DELAY_S for the delay line.
+    let rnnoiseTap: AudioNode | null = null
     if (this.noiseSuppressionMode === 'rnnoise') {
       try {
         await this.audioCtx.audioWorklet.addModule(NoiseSuppressorWorkletUrl)
@@ -407,19 +454,30 @@ export class MumbleWebRTCClient {
           numberOfOutputs: 1,
           outputChannelCount: [1],
         })
-        const dest = new MediaStreamAudioDestinationNode(this.audioCtx, { channelCount: 1 })
         micSource.connect(this.rnnoiseNode)
-        this.rnnoiseNode.connect(dest)
-        sendStream = dest.stream
-        ;[sendTrack] = dest.stream.getAudioTracks()
         // Gate on the denoised signal so steady background noise (fans,
-        // typing) no longer holds the transmit gate open.
-        loudnessTap = this.rnnoiseNode
+        // typing) no longer holds the RMS fallback gate open.
+        rnnoiseTap = this.rnnoiseNode
       } catch (err) {
         this.rnnoiseNode = null
         console.warn('RNNoise unavailable, sending raw mic audio', err)
       }
     }
+
+    // Fixed onset-protection delay in front of the destination. Forced mono to
+    // match dest and to downmix a stereo mic consistently in the non-RNNoise
+    // modes (previously those sent the capture track's channels as-is).
+    this.delayNode = new DelayNode(this.audioCtx, {
+      delayTime: TRANSMIT_DELAY_S,
+      maxDelayTime: TRANSMIT_DELAY_S,
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+    })
+    const dest = new MediaStreamAudioDestinationNode(this.audioCtx, { channelCount: 1 })
+    ;(rnnoiseTap ?? micSource).connect(this.delayNode)
+    this.delayNode.connect(dest)
+    const [sendTrack] = dest.stream.getAudioTracks()
     this.micTrack = sendTrack
 
     // addTransceiver (not addTrack) so the mic always gets its own new m=
@@ -428,44 +486,16 @@ export class MumbleWebRTCClient {
     // silently claim one of the REMOTE_SLOTS recvonly transceivers created
     // above instead of getting a dedicated line, throwing off the 1:1
     // mapping the bridge's track pool assumes.
-    const transceiver = this.pc.addTransceiver(sendTrack, { direction: 'sendrecv', streams: [sendStream] })
+    const transceiver = this.pc.addTransceiver(sendTrack, {
+      direction: 'sendrecv',
+      streams: [dest.stream],
+    })
     this.audioSender = transceiver.sender
 
-    // Loudness gate: an AudioWorkletNode tapping the send-path signal
-    // (RNNoise output when enabled, otherwise the raw mic source),
-    // independent of whatever the RTP sender currently references — see
-    // LOUDNESS_WORKLET_SOURCE for why a worklet instead of a poll. Starts
-    // silent, like Mumble's voice-activation mode, until the first loud
-    // window.
-    const workletURL = URL.createObjectURL(
-      new Blob([LOUDNESS_WORKLET_SOURCE], { type: 'application/javascript' }),
-    )
-    try {
-      await this.audioCtx.audioWorklet.addModule(workletURL)
-    } finally {
-      URL.revokeObjectURL(workletURL)
-    }
-    this.loudnessNode = new AudioWorkletNode(this.audioCtx, 'loudness-processor')
-    loudnessTap.connect(this.loudnessNode)
-    this.loudnessNode.port.onmessage = (evt: MessageEvent<number>) => {
-      const rms = evt.data
-      if (rms >= LOUDNESS_THRESHOLD) {
-        if (this.loudnessSilenceTimer !== null) {
-          clearTimeout(this.loudnessSilenceTimer)
-          this.loudnessSilenceTimer = null
-        }
-        if (!this.loudEnough) {
-          this.loudEnough = true
-          this.updateTransmission()
-        }
-      } else if (this.loudEnough && this.loudnessSilenceTimer === null) {
-        this.loudnessSilenceTimer = window.setTimeout(() => {
-          this.loudnessSilenceTimer = null
-          this.loudEnough = false
-          this.updateTransmission()
-        }, LOUDNESS_REDEMPTION_MS)
-      }
-    }
+    // Start the primary (Silero) gate on the *raw* capture stream. On failure
+    // it falls back to the RMS loudness gate tapping the send-path signal
+    // (RNNoise output when enabled, otherwise the raw mic source).
+    await this.startVAD(stream, rnnoiseTap ?? micSource)
 
     this.updateTransmission()
 
@@ -473,6 +503,91 @@ export class MumbleWebRTCClient {
     const sdp = applyOpusOptions(offer.sdp ?? '', this.opusBitrateBps, this.opusLowDelay)
     await this.pc.setLocalDescription({ type: offer.type, sdp })
     this.send({ type: 'sdp', sdpType: 'offer', sdp })
+  }
+
+  // Starts the Silero VAD on the raw capture stream. The VAD builds its own
+  // analysis node inside our AudioContext; it never touches the transmit
+  // graph, so it sees the mic *before* the onset-protection delay and its
+  // speech decision leads the audio actually being sent. If the model or its
+  // worklet can't load, falls back to the RMS loudness gate on `fallbackTap`.
+  private async startVAD(rawStream: MediaStream, fallbackTap: AudioNode): Promise<void> {
+    try {
+      this.vad = await MicVAD.new({
+        model: 'v5',
+        baseAssetPath: VAD_ASSET_PATH,
+        onnxWASMBasePath: VAD_ASSET_PATH,
+        audioContext: this.audioCtx!,
+        processorType: 'AudioWorklet',
+        startOnLoad: true,
+        // Reuse our existing capture stream instead of letting vad-web open
+        // its own getUserMedia. pauseStream must be a no-op: its default stops
+        // the stream's tracks, which would kill the shared microphone.
+        getStream: async () => rawStream,
+        pauseStream: async () => {},
+        resumeStream: async () => rawStream,
+        positiveSpeechThreshold: VAD_POSITIVE_THRESHOLD,
+        negativeSpeechThreshold: VAD_NEGATIVE_THRESHOLD,
+        redemptionMs: VAD_REDEMPTION_MS,
+        // We gate a live track; the pre-speech pad buffer vad-web would
+        // otherwise assemble is dead weight here.
+        preSpeechPadMs: 0,
+        // Open the gate on the very first positive frame (onSpeechStart) and
+        // always close it on onSpeechEnd — a nonzero minimum would suppress
+        // onSpeechEnd for short segments and route them to onVADMisfire
+        // instead, leaving the gate stuck open.
+        minSpeechMs: 0,
+        submitUserSpeechOnPause: false,
+        onSpeechStart: () => this.setGateOpen(true),
+        onSpeechEnd: () => this.setGateOpen(false),
+        onVADMisfire: () => this.setGateOpen(false),
+      })
+    } catch (err) {
+      console.warn('Silero VAD unavailable, falling back to RMS loudness gate', err)
+      this.vad = null
+      await this.startLoudnessGate(fallbackTap)
+    }
+  }
+
+  // RMS loudness fallback gate: an AudioWorkletNode tapping the send-path
+  // signal — see LOUDNESS_WORKLET_SOURCE for why a worklet instead of a poll.
+  // Starts silent, like Mumble's voice-activation mode, until the first loud
+  // window; a redemption timer keeps the gate open briefly after level drops.
+  private async startLoudnessGate(tap: AudioNode): Promise<void> {
+    const workletURL = URL.createObjectURL(
+      new Blob([LOUDNESS_WORKLET_SOURCE], { type: 'application/javascript' }),
+    )
+    try {
+      await this.audioCtx!.audioWorklet.addModule(workletURL)
+    } finally {
+      URL.revokeObjectURL(workletURL)
+    }
+    this.loudnessNode = new AudioWorkletNode(this.audioCtx!, 'loudness-processor')
+    tap.connect(this.loudnessNode)
+    this.loudnessNode.port.onmessage = (evt: MessageEvent<number>) => {
+      const rms = evt.data
+      if (rms >= LOUDNESS_THRESHOLD) {
+        if (this.loudnessSilenceTimer !== null) {
+          clearTimeout(this.loudnessSilenceTimer)
+          this.loudnessSilenceTimer = null
+        }
+        this.setGateOpen(true)
+      } else if (this.gateOpen && this.loudnessSilenceTimer === null) {
+        this.loudnessSilenceTimer = window.setTimeout(() => {
+          this.loudnessSilenceTimer = null
+          this.setGateOpen(false)
+        }, LOUDNESS_REDEMPTION_MS)
+      }
+    }
+  }
+
+  // Records the active gate's speech/silence decision and pushes it through to
+  // the RTP sender. Idempotent — no-ops if the state hasn't changed — so the
+  // VAD's frame-rate callbacks and the RMS worklet's per-window messages can
+  // both call it freely.
+  private setGateOpen(open: boolean): void {
+    if (this.gateOpen === open) return
+    this.gateOpen = open
+    this.updateTransmission()
   }
 
   setMuted(muted: boolean): void {
@@ -499,14 +614,14 @@ export class MumbleWebRTCClient {
   }
 
   // Stops audio leaving the browser entirely (rather than just having the
-  // server drop it) whenever manually muted or the loudness gate isn't
-  // triggered — matching a native client's voice-activation mode: no RTP
-  // packets at all during silence, not just silent ones, so it doesn't
-  // waste bandwidth or show as "talking" to other Mumble users. Gated via
-  // replaceTrack, not MediaStreamTrack.enabled — a disabled track is
-  // silent for every consumer of the underlying stream, not just the RTP
-  // sender, which would silence the AnalyserNode's own input too since it
-  // taps the same stream (see startWebRTC).
+  // server drop it) whenever manually muted or the speech gate is closed —
+  // matching a native client's voice-activation mode: no RTP packets at all
+  // during silence, not just silent ones, so it doesn't waste bandwidth or
+  // show as "talking" to other Mumble users. Gated via replaceTrack, not
+  // MediaStreamTrack.enabled — a disabled track is silent for every consumer
+  // of the underlying stream, not just the RTP sender, which in the RMS
+  // fallback would silence the loudness worklet's own input too since it taps
+  // the same graph (see startLoudnessGate).
   //
   // Earlier VAD-gated auto-mute attempts (see git history prior to
   // 2026-07-12) blamed replaceTrack(null) between talk spurts for real gaps
@@ -517,7 +632,7 @@ export class MumbleWebRTCClient {
   // regardless of VAD. The bridge no longer looks at RTP sequence numbers
   // at all, so replaceTrack can't desync it.
   private updateTransmission(): void {
-    const shouldTransmit = !this.manuallyMuted && this.loudEnough
+    const shouldTransmit = !this.manuallyMuted && this.gateOpen
     this.audioSender?.replaceTrack(shouldTransmit ? this.micTrack : null)
 
     // Self-talking never round-trips through the server — the bridge's
@@ -544,12 +659,18 @@ export class MumbleWebRTCClient {
       this.loudnessSilenceTimer = null
     }
     this.manuallyMuted = false
-    this.loudEnough = false
+    this.gateOpen = false
     this.selfTalking = false
     this.audioSender = null
+    // Safe to destroy: pauseStream is our no-op (won't stop the shared mic)
+    // and we don't own the AudioContext passed in, so destroy() won't close it.
+    void this.vad?.destroy()
+    this.vad = null
     this.loudnessNode?.port.close()
     this.loudnessNode?.disconnect()
     this.loudnessNode = null
+    this.delayNode?.disconnect()
+    this.delayNode = null
     this.rnnoiseNode?.disconnect()
     this.rnnoiseNode = null
     void this.audioCtx?.close()
