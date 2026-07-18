@@ -483,6 +483,16 @@ function appendRoomEvent(kind: RoomEventKind, username: string): void {
   setSheetLatest(line)
 }
 
+// Mumble chat messages/MOTD may embed <a href> links from native clients;
+// force them to open in a new tab so they don't navigate away from the
+// bridge session, and drop `rel` so the target page can't reach window.opener.
+function hardenLinks(container: HTMLElement): void {
+  container.querySelectorAll('a').forEach((a) => {
+    a.setAttribute('target', '_blank')
+    a.setAttribute('rel', 'noopener noreferrer')
+  })
+}
+
 function appendMessage(from: string, message: string): void {
   // Server messages carry no sender (e.g. the MOTD / ASCII welcome banner) —
   // render them as a bordered monospace block rather than a chat line.
@@ -491,6 +501,7 @@ function appendMessage(from: string, message: string): void {
     welcome.classList.add('chat-welcome')
     const pre = document.createElement('pre')
     pre.innerHTML = message
+    hardenLinks(pre)
     welcome.appendChild(pre)
     chatMessages.appendChild(welcome)
     chatMessages.scrollTop = chatMessages.scrollHeight
@@ -509,6 +520,7 @@ function appendMessage(from: string, message: string): void {
   const text = document.createElement('span')
   text.classList.add('body')
   text.innerHTML = message
+  hardenLinks(text)
   div.appendChild(label)
   div.appendChild(text)
   chatMessages.appendChild(div)
