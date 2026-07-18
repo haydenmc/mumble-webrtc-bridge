@@ -640,11 +640,6 @@ export class MumbleWebRTCClient {
     // this browser's own outgoing ones — so it's reported locally instead.
     if (shouldTransmit !== this.selfTalking) {
       this.selfTalking = shouldTransmit
-      // Tell the bridge to flush the talk spurt when we stop sending: it emits
-      // Mumble's end-of-transmission terminator frame so native clients drop
-      // the talking indicator promptly and reset their jitter buffer, instead
-      // of the RTP stream just going quiet mid-spurt.
-      if (!shouldTransmit) this.send({ type: 'endspurt' })
       this.events.onTalking(this.username, shouldTransmit)
     }
   }

@@ -89,11 +89,6 @@ type Peer struct {
 	muted  atomic.Bool
 	seqNum atomic.Int64
 
-	// spurtActive is true once audio has been forwarded to Mumble and not yet
-	// terminated. It makes the "endspurt" terminator idempotent: sent at most
-	// once per talk spurt, and never when no audio has been forwarded.
-	spurtActive atomic.Bool
-
 	// slotsReady guards against Mumble audio arriving (on the mumble.Client's
 	// internal goroutine, which can run concurrently with handleLogin/
 	// setupWebRTC before Dial has even returned) before the track pool
@@ -188,12 +183,6 @@ func (p *Peer) handleMessage(raw []byte) error {
 			return err
 		}
 		p.handleDeaf(m.Deafened)
-
-	// Sent by the browser's client-side VAD when a talk spurt ends (payload is
-	// just the type). Deliberately separate from "mute": this must NOT touch
-	// the server-visible self-mute flag, only flush the current spurt.
-	case "endspurt":
-		p.handleEndSpurt()
 	}
 	return nil
 }
@@ -659,28 +648,6 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 			log.Printf("peer %s: write audio: %v", p.id, err)
 			return
 		}
-		p.spurtActive.Store(true)
-	}
-}
-
-// handleEndSpurt emits Mumble's end-of-transmission terminator — an audio
-// frame with the final bit set and an empty Opus payload — when the browser's
-// VAD reports the talk spurt has ended. Native Mumble clients mark their last
-// frame this way; it drops the talking indicator promptly and lets the
-// receiver flush its jitter buffer instead of waiting out the stream going
-// quiet. The empty payload carries zero frames, so seq advances by 0 (matching
-// readBrowserAudio's padding-only rule). Idempotent via spurtActive: at most
-// one terminator per spurt, and none if no audio was ever forwarded. A
-// straggler RTP packet arriving afterwards simply starts a fresh spurt.
-func (p *Peer) handleEndSpurt() {
-	if p.mumble == nil || p.muted.Load() {
-		return
-	}
-	if !p.spurtActive.Swap(false) {
-		return
-	}
-	if err := p.mumble.WriteAudioPacket(0, p.seqNum.Load(), true, nil); err != nil {
-		log.Printf("peer %s: write terminator: %v", p.id, err)
 	}
 }
 
