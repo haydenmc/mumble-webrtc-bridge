@@ -48,7 +48,16 @@ const TRANSMIT_DELAY_S = VAD_FRAME_SAMPLES / VAD_SAMPLE_RATE + 0.012 // ~44ms
 // fails to load: RMS audio level against a fixed threshold. Cruder — any loud
 // sound trips it, not just speech — but has zero model dependency, so it keeps
 // voice activation working when the VAD assets are unavailable.
-const LOUDNESS_THRESHOLD = 0.01 // RMS of samples in [-1, 1]; tune by ear
+// Default RMS threshold (samples in [-1, 1]) — user-adjustable via the
+// `loudnessThreshold` constructor option so a too-sensitive fallback gate
+// (see issue #9) can be tuned without a rebuild. Only takes effect while the
+// RMS fallback gate is actually active (see startLoudnessGate).
+export const DEFAULT_LOUDNESS_THRESHOLD = 0.01
+// Bounds for the user-configurable threshold — keeps a bad saved/URL value
+// from producing a gate that's either permanently open (near 0) or can
+// never open (near 1).
+export const MIN_LOUDNESS_THRESHOLD = 0.001
+export const MAX_LOUDNESS_THRESHOLD = 0.2
 // How long to keep transmitting after the last loud sample before gating
 // closed again — avoids chopping speech into fragments at every brief dip
 // below threshold (a pause for breath, a soft consonant).
@@ -243,7 +252,13 @@ export class MumbleWebRTCClient {
     private noiseSuppressionMode: NoiseSuppressionMode = 'rnnoise',
     private autoGainControl: boolean = true,
     private echoCancellation: boolean = true,
-  ) {}
+    private loudnessThreshold: number = DEFAULT_LOUDNESS_THRESHOLD,
+  ) {
+    this.loudnessThreshold = Math.min(
+      MAX_LOUDNESS_THRESHOLD,
+      Math.max(MIN_LOUDNESS_THRESHOLD, loudnessThreshold),
+    )
+  }
 
   connect(username: string, password: string): void {
     this.username = username
@@ -565,7 +580,7 @@ export class MumbleWebRTCClient {
     tap.connect(this.loudnessNode)
     this.loudnessNode.port.onmessage = (evt: MessageEvent<number>) => {
       const rms = evt.data
-      if (rms >= LOUDNESS_THRESHOLD) {
+      if (rms >= this.loudnessThreshold) {
         if (this.loudnessSilenceTimer !== null) {
           clearTimeout(this.loudnessSilenceTimer)
           this.loudnessSilenceTimer = null

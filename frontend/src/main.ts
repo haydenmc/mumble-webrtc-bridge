@@ -1,4 +1,12 @@
-import { MumbleWebRTCClient, type NoiseSuppressionMode, type RoomEventKind, type UserInfo } from './client'
+import {
+  DEFAULT_LOUDNESS_THRESHOLD,
+  MAX_LOUDNESS_THRESHOLD,
+  MIN_LOUDNESS_THRESHOLD,
+  MumbleWebRTCClient,
+  type NoiseSuppressionMode,
+  type RoomEventKind,
+  type UserInfo,
+} from './client'
 import { playSound, setSoundsEnabled } from './sounds'
 
 // --- DOM refs ---
@@ -8,6 +16,8 @@ const loginForm = document.getElementById('login-form') as HTMLFormElement
 const usernameInput = document.getElementById('username') as HTMLInputElement
 const passwordInput = document.getElementById('password') as HTMLInputElement
 const soundsToggle = document.getElementById('sounds-toggle') as HTMLInputElement
+const volumeThresholdRange = document.getElementById('volume-threshold-range') as HTMLInputElement
+const volumeThresholdValue = document.getElementById('volume-threshold-value')!
 const bitrateSelect = document.getElementById('bitrate-select') as HTMLSelectElement
 const lowDelayToggle = document.getElementById('low-delay-toggle') as HTMLInputElement
 const autoGainToggle = document.getElementById('auto-gain-toggle') as HTMLInputElement
@@ -67,6 +77,23 @@ function colorFor(name: string): string {
   return AVATAR_COLORS[h % AVATAR_COLORS.length]
 }
 
+// --- Volume threshold slider ---
+// The range input works in permille (thousandths) of the RMS fraction client
+// expects, so the slider can use whole-number steps instead of decimals.
+const THRESHOLD_RANGE_SCALE = 1000
+volumeThresholdRange.min = String(Math.round(MIN_LOUDNESS_THRESHOLD * THRESHOLD_RANGE_SCALE))
+volumeThresholdRange.max = String(Math.round(MAX_LOUDNESS_THRESHOLD * THRESHOLD_RANGE_SCALE))
+volumeThresholdRange.value = String(Math.round(DEFAULT_LOUDNESS_THRESHOLD * THRESHOLD_RANGE_SCALE))
+
+function volumeThresholdFraction(): number {
+  return parseInt(volumeThresholdRange.value, 10) / THRESHOLD_RANGE_SCALE
+}
+
+function renderVolumeThresholdReadout(): void {
+  volumeThresholdValue.textContent = `${(volumeThresholdFraction() * 100).toFixed(1)}%`
+}
+renderVolumeThresholdReadout()
+
 // --- Client setup ---
 function createClient(
   bitrateBps: number,
@@ -74,6 +101,7 @@ function createClient(
   noiseSuppressionMode: NoiseSuppressionMode,
   autoGainControl: boolean,
   echoCancellation: boolean,
+  loudnessThreshold: number,
 ): MumbleWebRTCClient {
   return new MumbleWebRTCClient(
     {
@@ -130,6 +158,7 @@ function createClient(
     noiseSuppressionMode,
     autoGainControl,
     echoCancellation,
+    loudnessThreshold,
   )
 }
 
@@ -164,7 +193,7 @@ function loadAdvancedOptions(): void {
   try {
     const saved = localStorage.getItem(ADVANCED_OPTIONS_STORAGE_KEY)
     if (!saved) return
-    const { bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled } =
+    const { bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled, loudnessThreshold } =
       JSON.parse(saved)
     if (bitrateBps) bitrateSelect.value = String(bitrateBps)
     if (lowDelay !== undefined) lowDelayToggle.checked = Boolean(lowDelay)
@@ -174,10 +203,15 @@ function loadAdvancedOptions(): void {
       noiseSuppressionSelect.value = noiseSuppressionMode
     }
     if (soundsEnabled !== undefined) soundsToggle.checked = Boolean(soundsEnabled)
+    if (typeof loudnessThreshold === 'number') {
+      const clamped = Math.min(MAX_LOUDNESS_THRESHOLD, Math.max(MIN_LOUDNESS_THRESHOLD, loudnessThreshold))
+      volumeThresholdRange.value = String(Math.round(clamped * THRESHOLD_RANGE_SCALE))
+    }
   } catch {
     // ignore malformed storage
   }
   setSoundsEnabled(soundsToggle.checked)
+  renderVolumeThresholdReadout()
 }
 
 function saveAdvancedOptions(
@@ -187,17 +221,28 @@ function saveAdvancedOptions(
   echoCancellation: boolean,
   noiseSuppressionMode: NoiseSuppressionMode,
   soundsEnabled: boolean,
+  loudnessThreshold: number,
 ): void {
   localStorage.setItem(
     ADVANCED_OPTIONS_STORAGE_KEY,
-    JSON.stringify({ bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled }),
+    JSON.stringify({
+      bitrateBps,
+      lowDelay,
+      autoGainControl,
+      echoCancellation,
+      noiseSuppressionMode,
+      soundsEnabled,
+      loudnessThreshold,
+    }),
   )
 }
 
 loadAdvancedOptions()
 
-soundsToggle.addEventListener('change', () => {
-  setSoundsEnabled(soundsToggle.checked)
+// Reads the advanced-options controls' current values and persists them —
+// shared by every toggle/slider's `change` listener so each one doesn't have
+// to repeat the full field list.
+function persistAdvancedOptions(): void {
   saveAdvancedOptions(
     parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS,
     lowDelayToggle.checked,
@@ -205,7 +250,18 @@ soundsToggle.addEventListener('change', () => {
     echoCancellationToggle.checked,
     noiseSuppressionSelect.value as NoiseSuppressionMode,
     soundsToggle.checked,
+    volumeThresholdFraction(),
   )
+}
+
+soundsToggle.addEventListener('change', () => {
+  setSoundsEnabled(soundsToggle.checked)
+  persistAdvancedOptions()
+})
+
+volumeThresholdRange.addEventListener('input', () => {
+  renderVolumeThresholdReadout()
+  persistAdvancedOptions()
 })
 
 // --- Login ---
@@ -220,15 +276,16 @@ loginForm.addEventListener('submit', (e) => {
   const autoGainControl = autoGainToggle.checked
   const echoCancellation = echoCancellationToggle.checked
   const noiseSuppressionMode = noiseSuppressionSelect.value as NoiseSuppressionMode
+  const loudnessThreshold = volumeThresholdFraction()
 
   saveCredentials(username, password)
-  saveAdvancedOptions(bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsToggle.checked)
+  persistAdvancedOptions()
   loginError.classList.add('hidden')
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
 
   currentUsername = username
-  client = createClient(bitrateBps, lowDelay, noiseSuppressionMode, autoGainControl, echoCancellation)
+  client = createClient(bitrateBps, lowDelay, noiseSuppressionMode, autoGainControl, echoCancellation, loudnessThreshold)
   client.connect(username, password)
 })
 
