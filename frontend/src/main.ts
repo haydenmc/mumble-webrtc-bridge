@@ -282,6 +282,14 @@ function applyMute(next: boolean): void {
   muted = next
   client?.setMuted(muted)
   renderMuteButton()
+  // Deafen forces mute, so the mute button reads "unmute" while deafened.
+  // Native Mumble clients treat "deafened but not muted" as invalid —
+  // client.setMuted() already cleared deafen server-side in this case (see
+  // its comment); mirror that here in the deafen button's UI.
+  if (!muted && deafened) {
+    deafened = false
+    renderDeafenButton()
+  }
 }
 
 renderMuteButton()
