@@ -414,3 +414,19 @@ func (c *Client) SetSelfDeafened(deaf bool) error {
 		SelfDeaf: &deaf,
 	})
 }
+
+// SetSelfMuteDeaf sets the client's own self-mute and self-deaf flags
+// together in a single UserState packet, visible to other users. Toggling
+// deafen always implies a mute change too, and sending that as one packet
+// (rather than two separate SetSelfMuted/SetSelfDeafened calls) avoids some
+// Mumble servers broadcasting the resulting state-change notification twice.
+func (c *Client) SetSelfMuteDeaf(muted, deaf bool) error {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	return c.conn.writeProto(&MumbleProto.UserState{
+		Session:  &session,
+		SelfMute: &muted,
+		SelfDeaf: &deaf,
+	})
+}

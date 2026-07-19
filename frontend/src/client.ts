@@ -590,27 +590,45 @@ export class MumbleWebRTCClient {
     this.updateTransmission()
   }
 
+  // Native Mumble clients treat "deafened but not muted" as an invalid
+  // combination: unmuting while deafened clears deafen too, rather than
+  // leaving that state on the wire. That case is folded into the same
+  // 'mute_deaf' message setDeafened() uses (instead of a plain 'mute'
+  // message) so it's still a single combined UserState packet — see
+  // setDeafened's comment for why that matters.
   setMuted(muted: boolean): void {
     this.manuallyMuted = muted
-    this.send({ type: 'mute', muted })
+    if (!muted && this.deafened) {
+      this.deafened = false
+      for (const el of this.remoteAudioEls.values()) el.muted = false
+      this.send({ type: 'mute_deaf', muted, deafened: false })
+    } else {
+      this.send({ type: 'mute', muted })
+    }
     this.updateTransmission()
   }
 
   // Mutes/unmutes playback of every remote audio element and signals self-deaf
-  // to the Mumble server so remote users see our deaf state. Deafening also
-  // forces self-mute (a native client can't be deaf-but-transmitting);
-  // un-deafening restores whatever mute state we had before deafening rather
-  // than blindly unmuting.
+  // (plus the resulting self-mute) to the Mumble server in a single message,
+  // so other users see our deaf state. Deafening also forces self-mute (a
+  // native client can't be deaf-but-transmitting); un-deafening restores
+  // whatever mute state we had before deafening rather than blindly
+  // unmuting. The mute is folded into the same 'mute_deaf' message (rather
+  // than calling setMuted separately) so the bridge sends one combined
+  // UserState to the Mumble server instead of two — sending self-deaf and
+  // self-mute as separate packets causes some servers to broadcast the "is
+  // now muted and deafened" notification to other clients twice.
   setDeafened(deafened: boolean): void {
     this.deafened = deafened
     for (const el of this.remoteAudioEls.values()) el.muted = deafened
-    this.send({ type: 'deaf', deafened })
     if (deafened) {
       this.muteBeforeDeafen = this.manuallyMuted
-      this.setMuted(true)
+      this.manuallyMuted = true
     } else {
-      this.setMuted(this.muteBeforeDeafen)
+      this.manuallyMuted = this.muteBeforeDeafen
     }
+    this.send({ type: 'mute_deaf', muted: this.manuallyMuted, deafened })
+    this.updateTransmission()
   }
 
   // Stops audio leaving the browser entirely (rather than just having the
