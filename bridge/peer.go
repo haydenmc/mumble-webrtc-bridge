@@ -177,12 +177,12 @@ func (p *Peer) handleMessage(raw []byte) error {
 		}
 		p.handleMute(m.Muted)
 
-	case "deaf":
-		var m deafMsg
+	case "mute_deaf":
+		var m muteDeafMsg
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return err
 		}
-		p.handleDeaf(m.Deafened, m.Muted)
+		p.handleMuteDeaf(m.Muted, m.Deafened)
 	}
 	return nil
 }
@@ -461,16 +461,16 @@ func (p *Peer) handleMute(muted bool) {
 	}
 }
 
-// handleDeaf reflects manual (button) deafen to other Mumble clients via the
-// self-deaf flag, together with the mute state the browser has already
-// resolved for it (deafening forces mute; un-deafening restores the prior
-// mute state). Remote audio silencing itself is handled entirely
-// client-side; this only makes the deaf/mute state visible to other Mumble
-// users. Both flags are sent in a single UserState packet — sending them as
-// two separate packets (self-deaf then self-mute) causes some Mumble servers
-// to broadcast the resulting "is now muted and deafened" notification to
-// other clients twice.
-func (p *Peer) handleDeaf(deafened, muted bool) {
+// handleMuteDeaf reflects manual (button) mute+deafen to other Mumble clients
+// via the self-mute/self-deaf flags, together in one call (deafening forces
+// mute; un-deafening restores the prior mute state, so the browser always
+// resolves both flags before sending). Remote audio silencing itself is
+// handled entirely client-side; this only makes the mute/deaf state visible
+// to other Mumble users. Both flags are sent in a single UserState packet —
+// sending them as two separate packets (self-deaf then self-mute) causes
+// some Mumble servers to broadcast the resulting "is now muted and deafened"
+// notification to other clients twice.
+func (p *Peer) handleMuteDeaf(muted, deafened bool) {
 	p.muted.Store(muted)
 	if p.mumble == nil {
 		return

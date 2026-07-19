@@ -36,10 +36,13 @@ type muteMsg struct {
 	Muted bool   `json:"muted"`
 }
 
-type deafMsg struct {
+// muteDeafMsg is sent for the deafen button, which resolves both flags
+// together (deafening forces mute; un-deafening restores the prior mute
+// state) — see handleMuteDeaf.
+type muteDeafMsg struct {
 	Type     string `json:"type"`
-	Deafened bool   `json:"deafened"`
 	Muted    bool   `json:"muted"`
+	Deafened bool   `json:"deafened"`
 }
 
 type userInfo struct {

@@ -601,11 +601,11 @@ export class MumbleWebRTCClient {
   // so other users see our deaf state. Deafening also forces self-mute (a
   // native client can't be deaf-but-transmitting); un-deafening restores
   // whatever mute state we had before deafening rather than blindly
-  // unmuting. The mute is folded into the same 'deaf' message (rather than
-  // calling setMuted separately) so the bridge sends one combined UserState
-  // to the Mumble server instead of two — sending self-deaf and self-mute as
-  // separate packets causes some servers to broadcast the "is now muted and
-  // deafened" notification to other clients twice.
+  // unmuting. The mute is folded into the same 'mute_deaf' message (rather
+  // than calling setMuted separately) so the bridge sends one combined
+  // UserState to the Mumble server instead of two — sending self-deaf and
+  // self-mute as separate packets causes some servers to broadcast the "is
+  // now muted and deafened" notification to other clients twice.
   setDeafened(deafened: boolean): void {
     this.deafened = deafened
     for (const el of this.remoteAudioEls.values()) el.muted = deafened
@@ -615,7 +615,7 @@ export class MumbleWebRTCClient {
     } else {
       this.manuallyMuted = this.muteBeforeDeafen
     }
-    this.send({ type: 'deaf', deafened, muted: this.manuallyMuted })
+    this.send({ type: 'mute_deaf', muted: this.manuallyMuted, deafened })
     this.updateTransmission()
   }
 
