@@ -142,6 +142,13 @@ input::placeholder { color: #8a8a8a; }
 #login-form .advanced-options .select-wrap { margin-bottom: 1.15rem; }
 #login-form .advanced-options .select-wrap select { margin-bottom: 0; }
 
+.range-input {
+  display: block; width: 100%; margin: 0 0 .5rem; accent-color: var(--accent);
+}
+.range-hint {
+  font-size: .78rem; color: var(--muted); margin: 0 0 1.15rem; line-height: 1.4;
+}
+
 #connect-btn {
   width: 100%; padding: .85rem;
   background: var(--accent); border: none; border-radius: 0;
