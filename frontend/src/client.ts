@@ -243,7 +243,13 @@ export class MumbleWebRTCClient {
     private noiseSuppressionMode: NoiseSuppressionMode = 'rnnoise',
     private autoGainControl: boolean = true,
     private echoCancellation: boolean = true,
-  ) {}
+    private joinMuted: boolean = false,
+  ) {
+    // Gate transmission from construction time, before connect() even starts
+    // capturing the microphone, so a "join muted" request never leaks audio
+    // during connection setup.
+    this.manuallyMuted = joinMuted
+  }
 
   connect(username: string, password: string): void {
     this.username = username
@@ -275,6 +281,7 @@ export class MumbleWebRTCClient {
     switch (msg.type) {
       case 'connected':
         await this.startWebRTC()
+        if (this.joinMuted) this.setMuted(true)
         this.events.onConnected()
         break
 
