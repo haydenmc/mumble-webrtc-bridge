@@ -32,6 +32,14 @@ const VAD_NEGATIVE_THRESHOLD = 0.2
 // sentence into fragments. vad-web converts this to whole frames internally.
 const VAD_REDEMPTION_MS = 500
 
+// Ceiling on how long we'll wait for the Silero VAD (onnxruntime-web's WASM
+// init + first model load) before giving up and falling back to the RMS
+// loudness gate. Some browsers never reject or resolve that promise at all —
+// e.g. GrapheneOS's Vanadium, which disables the JS JIT by default, has been
+// observed to leave WASM compilation stuck indefinitely — and without this
+// timeout the whole join flow would hang forever waiting on it.
+const VAD_INIT_TIMEOUT_MS = 15_000
+
 // Onset-protection delay, applied to the transmit path only (never to the
 // signal the VAD analyzes). Derived from what Silero actually needs rather
 // than hard-coded: an onset is detectable at worst one full 512/16000 = 32ms
@@ -152,6 +160,28 @@ function applyOpusOptions(sdp: string, bitrateBps: number, lowDelay: boolean): s
       return result
     })
     .join('')
+}
+
+// Races `promise` against a timeout, so a promise that never settles (rather
+// than one that rejects) can still be recovered from. The timeout is a
+// terminal error: if `promise` later settles it's ignored by this race, but
+// callers who need to release resources on it (e.g. destroying an object
+// that showed up late) should chain their own handler off the original
+// promise, not this one.
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
 }
 
 export interface UserInfo {
@@ -511,39 +541,48 @@ export class MumbleWebRTCClient {
   // speech decision leads the audio actually being sent. If the model or its
   // worklet can't load, falls back to the RMS loudness gate on `fallbackTap`.
   private async startVAD(rawStream: MediaStream, fallbackTap: AudioNode): Promise<void> {
+    const vadPromise = MicVAD.new({
+      model: 'v5',
+      baseAssetPath: VAD_ASSET_PATH,
+      onnxWASMBasePath: VAD_ASSET_PATH,
+      audioContext: this.audioCtx!,
+      processorType: 'AudioWorklet',
+      startOnLoad: true,
+      // Reuse our existing capture stream instead of letting vad-web open
+      // its own getUserMedia. pauseStream must be a no-op: its default stops
+      // the stream's tracks, which would kill the shared microphone.
+      getStream: async () => rawStream,
+      pauseStream: async () => {},
+      resumeStream: async () => rawStream,
+      positiveSpeechThreshold: VAD_POSITIVE_THRESHOLD,
+      negativeSpeechThreshold: VAD_NEGATIVE_THRESHOLD,
+      redemptionMs: VAD_REDEMPTION_MS,
+      // We gate a live track; the pre-speech pad buffer vad-web would
+      // otherwise assemble is dead weight here.
+      preSpeechPadMs: 0,
+      // Open the gate on the very first positive frame (onSpeechStart) and
+      // always close it on onSpeechEnd — a nonzero minimum would suppress
+      // onSpeechEnd for short segments and route them to onVADMisfire
+      // instead, leaving the gate stuck open.
+      minSpeechMs: 0,
+      submitUserSpeechOnPause: false,
+      onSpeechStart: () => this.setGateOpen(true),
+      onSpeechEnd: () => this.setGateOpen(false),
+      onVADMisfire: () => this.setGateOpen(false),
+    })
     try {
-      this.vad = await MicVAD.new({
-        model: 'v5',
-        baseAssetPath: VAD_ASSET_PATH,
-        onnxWASMBasePath: VAD_ASSET_PATH,
-        audioContext: this.audioCtx!,
-        processorType: 'AudioWorklet',
-        startOnLoad: true,
-        // Reuse our existing capture stream instead of letting vad-web open
-        // its own getUserMedia. pauseStream must be a no-op: its default stops
-        // the stream's tracks, which would kill the shared microphone.
-        getStream: async () => rawStream,
-        pauseStream: async () => {},
-        resumeStream: async () => rawStream,
-        positiveSpeechThreshold: VAD_POSITIVE_THRESHOLD,
-        negativeSpeechThreshold: VAD_NEGATIVE_THRESHOLD,
-        redemptionMs: VAD_REDEMPTION_MS,
-        // We gate a live track; the pre-speech pad buffer vad-web would
-        // otherwise assemble is dead weight here.
-        preSpeechPadMs: 0,
-        // Open the gate on the very first positive frame (onSpeechStart) and
-        // always close it on onSpeechEnd — a nonzero minimum would suppress
-        // onSpeechEnd for short segments and route them to onVADMisfire
-        // instead, leaving the gate stuck open.
-        minSpeechMs: 0,
-        submitUserSpeechOnPause: false,
-        onSpeechStart: () => this.setGateOpen(true),
-        onSpeechEnd: () => this.setGateOpen(false),
-        onVADMisfire: () => this.setGateOpen(false),
-      })
+      this.vad = await withTimeout(
+        vadPromise,
+        VAD_INIT_TIMEOUT_MS,
+        `Silero VAD init did not settle within ${VAD_INIT_TIMEOUT_MS}ms`,
+      )
     } catch (err) {
       console.warn('Silero VAD unavailable, falling back to RMS loudness gate', err)
       this.vad = null
+      // If MicVAD.new() was merely slow rather than truly stuck, it may still
+      // resolve after we've already fallen back — destroy it then rather
+      // than leaving a second, unused gate (and its worklet) running.
+      void vadPromise.then((vad) => vad.destroy()).catch(() => {})
       await this.startLoudnessGate(fallbackTap)
     }
   }
