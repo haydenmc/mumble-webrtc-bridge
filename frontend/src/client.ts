@@ -590,9 +590,21 @@ export class MumbleWebRTCClient {
     this.updateTransmission()
   }
 
+  // Native Mumble clients treat "deafened but not muted" as an invalid
+  // combination: unmuting while deafened clears deafen too, rather than
+  // leaving that state on the wire. That case is folded into the same
+  // 'mute_deaf' message setDeafened() uses (instead of a plain 'mute'
+  // message) so it's still a single combined UserState packet — see
+  // setDeafened's comment for why that matters.
   setMuted(muted: boolean): void {
     this.manuallyMuted = muted
-    this.send({ type: 'mute', muted })
+    if (!muted && this.deafened) {
+      this.deafened = false
+      for (const el of this.remoteAudioEls.values()) el.muted = false
+      this.send({ type: 'mute_deaf', muted, deafened: false })
+    } else {
+      this.send({ type: 'mute', muted })
+    }
     this.updateTransmission()
   }
 
