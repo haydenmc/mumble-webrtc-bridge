@@ -8,6 +8,7 @@ const loginForm = document.getElementById('login-form') as HTMLFormElement
 const usernameInput = document.getElementById('username') as HTMLInputElement
 const passwordInput = document.getElementById('password') as HTMLInputElement
 const soundsToggle = document.getElementById('sounds-toggle') as HTMLInputElement
+const joinMutedToggle = document.getElementById('join-muted-toggle') as HTMLInputElement
 const bitrateSelect = document.getElementById('bitrate-select') as HTMLSelectElement
 const lowDelayToggle = document.getElementById('low-delay-toggle') as HTMLInputElement
 const autoGainToggle = document.getElementById('auto-gain-toggle') as HTMLInputElement
@@ -74,6 +75,7 @@ function createClient(
   noiseSuppressionMode: NoiseSuppressionMode,
   autoGainControl: boolean,
   echoCancellation: boolean,
+  joinMuted: boolean,
 ): MumbleWebRTCClient {
   return new MumbleWebRTCClient(
     {
@@ -130,6 +132,7 @@ function createClient(
     noiseSuppressionMode,
     autoGainControl,
     echoCancellation,
+    joinMuted,
   )
 }
 
@@ -164,7 +167,7 @@ function loadAdvancedOptions(): void {
   try {
     const saved = localStorage.getItem(ADVANCED_OPTIONS_STORAGE_KEY)
     if (!saved) return
-    const { bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled } =
+    const { bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled, joinMuted } =
       JSON.parse(saved)
     if (bitrateBps) bitrateSelect.value = String(bitrateBps)
     if (lowDelay !== undefined) lowDelayToggle.checked = Boolean(lowDelay)
@@ -174,6 +177,7 @@ function loadAdvancedOptions(): void {
       noiseSuppressionSelect.value = noiseSuppressionMode
     }
     if (soundsEnabled !== undefined) soundsToggle.checked = Boolean(soundsEnabled)
+    if (joinMuted !== undefined) joinMutedToggle.checked = Boolean(joinMuted)
   } catch {
     // ignore malformed storage
   }
@@ -187,10 +191,19 @@ function saveAdvancedOptions(
   echoCancellation: boolean,
   noiseSuppressionMode: NoiseSuppressionMode,
   soundsEnabled: boolean,
+  joinMuted: boolean,
 ): void {
   localStorage.setItem(
     ADVANCED_OPTIONS_STORAGE_KEY,
-    JSON.stringify({ bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled }),
+    JSON.stringify({
+      bitrateBps,
+      lowDelay,
+      autoGainControl,
+      echoCancellation,
+      noiseSuppressionMode,
+      soundsEnabled,
+      joinMuted,
+    }),
   )
 }
 
@@ -205,6 +218,19 @@ soundsToggle.addEventListener('change', () => {
     echoCancellationToggle.checked,
     noiseSuppressionSelect.value as NoiseSuppressionMode,
     soundsToggle.checked,
+    joinMutedToggle.checked,
+  )
+})
+
+joinMutedToggle.addEventListener('change', () => {
+  saveAdvancedOptions(
+    parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS,
+    lowDelayToggle.checked,
+    autoGainToggle.checked,
+    echoCancellationToggle.checked,
+    noiseSuppressionSelect.value as NoiseSuppressionMode,
+    soundsToggle.checked,
+    joinMutedToggle.checked,
   )
 })
 
@@ -220,15 +246,26 @@ loginForm.addEventListener('submit', (e) => {
   const autoGainControl = autoGainToggle.checked
   const echoCancellation = echoCancellationToggle.checked
   const noiseSuppressionMode = noiseSuppressionSelect.value as NoiseSuppressionMode
+  const joinMuted = joinMutedToggle.checked
 
   saveCredentials(username, password)
-  saveAdvancedOptions(bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsToggle.checked)
+  saveAdvancedOptions(
+    bitrateBps,
+    lowDelay,
+    autoGainControl,
+    echoCancellation,
+    noiseSuppressionMode,
+    soundsToggle.checked,
+    joinMuted,
+  )
   loginError.classList.add('hidden')
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
 
   currentUsername = username
-  client = createClient(bitrateBps, lowDelay, noiseSuppressionMode, autoGainControl, echoCancellation)
+  muted = joinMuted
+  renderMuteButton()
+  client = createClient(bitrateBps, lowDelay, noiseSuppressionMode, autoGainControl, echoCancellation, joinMuted)
   client.connect(username, password)
 })
 
