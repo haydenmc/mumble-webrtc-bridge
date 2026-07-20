@@ -23,11 +23,12 @@ const VAD_SAMPLE_RATE = 16000
 // probability the *first* frame of a word must reach for onSpeechStart to fire
 // and open the gate, so it directly controls both sensitivity to short/soft
 // words and how promptly the onset is detected (a high value delays the open
-// past what the transmit delay line can cover, clipping the word). Kept at the
-// library's sensitive default rather than raised — for a comms app, letting an
-// occasional non-speech blip through beats swallowing quiet words. Tune by ear.
-const VAD_POSITIVE_THRESHOLD = 0.3
-const VAD_NEGATIVE_THRESHOLD = 0.2
+// past what the transmit delay line can cover, clipping the word). Lowered
+// below the library's default (0.5) after reports of short/soft utterances
+// and phrase starts being swallowed — for a comms app, letting an occasional
+// non-speech blip through beats dropping quiet words. Tune by ear.
+const VAD_POSITIVE_THRESHOLD = 0.2
+const VAD_NEGATIVE_THRESHOLD = 0.15
 // Hang time after speech drops before closing the gate — mirrors the old RMS
 // gate's 500ms so brief pauses (a breath, a soft consonant) don't chop a
 // sentence into fragments. vad-web converts this to whole frames internally.
@@ -35,15 +36,14 @@ const VAD_REDEMPTION_MS = 500
 
 // Onset-protection delay, applied to the transmit path only (never to the
 // signal the VAD analyzes). Derived from what Silero actually needs rather
-// than hard-coded: an onset is detectable at worst one full 512/16000 = 32ms
-// frame after it begins, so delaying the transmitted audio by that frame plus
-// a small margin (inference, worklet→main-thread messaging, replaceTrack
-// settling) lets the gate open before the first phoneme reaches the sender —
-// no clipped word starts. Fixed for the session: changing DelayNode.delayTime
-// live glitches audibly, so there's no runtime adaptation. The one onset this
-// can't cover is the rare case where the first frame scores below threshold
-// and only the second (~64ms in) trips it; no sub-50ms delay could.
-const TRANSMIT_DELAY_S = VAD_FRAME_SAMPLES / VAD_SAMPLE_RATE + 0.012 // ~44ms
+// than hard-coded: sized to cover two full 512/16000 = 32ms frames, since the
+// first frame of a soft onset sometimes scores below threshold and only the
+// second (~64ms in) trips it, plus a small margin (inference, worklet→main-
+// thread messaging, replaceTrack settling) so the gate opens before the first
+// phoneme reaches the sender — no clipped word starts. Fixed for the session:
+// changing DelayNode.delayTime live glitches audibly, so there's no runtime
+// adaptation.
+const TRANSMIT_DELAY_S = (2 * VAD_FRAME_SAMPLES) / VAD_SAMPLE_RATE + 0.011 // ~75ms
 
 // Fallback transmission gate, used only when the Silero model or its worklet
 // fails to load: RMS audio level against a fixed threshold. Cruder — any loud
