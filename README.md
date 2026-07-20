@@ -10,6 +10,8 @@ Since this is just a hacked together tool for my friend group to use, the
 code is largely LLM-generated, but I make an effort to manually review each
 change.
 
+<img width="1277" height="719" alt="Screenshot of front-end user interface, showing users on the left, chat on the right, and a set of mute/deafen/disconnect buttons on the top." src="https://github.com/user-attachments/assets/a396f45e-50f5-411c-bf48-d412592bb255" />
+
 ## How it works
 
 - The Go server holds a from-scratch Mumble client (`internal/mumble`) that
