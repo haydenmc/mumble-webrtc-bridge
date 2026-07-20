@@ -6,6 +6,10 @@ protocol (TCP control channel + UDP voice) on one side and WebRTC + a
 WebSocket signaling channel on the other, relaying Opus audio between the two
 without ever decoding it.
 
+Since this is just a hacked together tool for my friend group to use, the
+code is largely LLM-generated, but I make an effort to manually review each
+change.
+
 ## How it works
 
 - The Go server holds a from-scratch Mumble client (`internal/mumble`) that
