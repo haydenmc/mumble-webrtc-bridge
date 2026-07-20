@@ -544,6 +544,47 @@ function hardenLinks(container: HTMLElement): void {
   })
 }
 
+// Wrap bare http/https URLs in anchor tags so plain-text links (from the web
+// frontend, bots, or minimal clients that don't send rich text) are clickable.
+// Works on the parsed DOM, not the raw string, so it only ever touches text
+// nodes — never existing markup or attribute values — and skips text already
+// inside an <a> so anchors that native Mumble clients sent aren't double-wrapped.
+// Only http/https match, so no javascript:/data: URLs can be produced. Runs
+// before hardenLinks so the anchors it creates also get target/rel hardening.
+const URL_RE = /\bhttps?:\/\/[^\s<]+/gi
+function linkifyText(container: HTMLElement): void {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+  const targets: Text[] = []
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const node = n as Text
+    if (node.parentElement?.closest('a')) continue
+    URL_RE.lastIndex = 0
+    if (URL_RE.test(node.data)) targets.push(node)
+  }
+  for (const node of targets) {
+    const data = node.data
+    const frag = document.createDocumentFragment()
+    let last = 0
+    let m: RegExpExecArray | null
+    URL_RE.lastIndex = 0
+    while ((m = URL_RE.exec(data))) {
+      let url = m[0]
+      // Don't swallow trailing sentence punctuation, e.g. "see https://x.com."
+      const trailing = url.match(/[.,;:!?)\]}"']+$/)?.[0] ?? ''
+      if (trailing) url = url.slice(0, url.length - trailing.length)
+      if (m.index > last) frag.appendChild(document.createTextNode(data.slice(last, m.index)))
+      const a = document.createElement('a')
+      a.href = url
+      a.textContent = url
+      frag.appendChild(a)
+      if (trailing) frag.appendChild(document.createTextNode(trailing))
+      last = m.index + m[0].length
+    }
+    if (last < data.length) frag.appendChild(document.createTextNode(data.slice(last)))
+    node.replaceWith(frag)
+  }
+}
+
 function appendMessage(from: string, message: string): void {
   // Server messages carry no sender (e.g. the MOTD / ASCII welcome banner) —
   // render them as a bordered monospace block rather than a chat line.
@@ -552,6 +593,7 @@ function appendMessage(from: string, message: string): void {
     welcome.classList.add('chat-welcome')
     const pre = document.createElement('pre')
     pre.innerHTML = message
+    linkifyText(pre)
     hardenLinks(pre)
     welcome.appendChild(pre)
     chatMessages.appendChild(welcome)
@@ -571,6 +613,7 @@ function appendMessage(from: string, message: string): void {
   const text = document.createElement('span')
   text.classList.add('body')
   text.innerHTML = message
+  linkifyText(text)
   hardenLinks(text)
   div.appendChild(label)
   div.appendChild(text)
