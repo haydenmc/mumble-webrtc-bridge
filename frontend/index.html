@@ -79,10 +79,15 @@
           <div class="brand-eyebrow">mumble</div>
           <h1 class="room-title">{{.Title}}</h1>
         </div>
-        <!-- mobile-only disconnect (CSS hides on desktop; the labeled one lives in .app-actions) -->
-        <button id="disconnect-btn-mobile" class="disconnect-mobile" title="Disconnect">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
-        </button>
+        <!-- mobile-only header actions (CSS hides on desktop; the labeled equivalents live in .app-actions) -->
+        <div class="mobile-header-actions">
+          <button id="settings-btn-mobile" class="mobile-header-btn" title="Settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+          <button id="disconnect-btn-mobile" class="mobile-header-btn" title="Disconnect">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+          </button>
+        </div>
       </header>
 
       <!-- Voice controls. Desktop: overlaid top-right of the app bar. Mobile: a
@@ -98,6 +103,12 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5a9 9 0 0 1 18 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"/></svg>
           </span>
           <span class="btn-label">Deafen</span>
+        </button>
+        <button id="settings-btn" class="ctrl-btn ctrl-btn-settings">
+          <span class="ctrl-circle ctrl-circle-plain">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          </span>
+          <span class="btn-label">Settings</span>
         </button>
         <div class="app-actions-divider"></div>
         <button id="disconnect-btn" class="ctrl-btn ctrl-btn-disconnect">
@@ -139,6 +150,66 @@
         </form>
       </main>
 
+    </div>
+
+    <!-- Settings modal: opened via #settings-btn / #settings-btn-mobile. Every
+         control applies live (no reconnect) and persists via saveSettings(). -->
+    <div id="settings-overlay" class="settings-overlay hidden">
+      <div id="settings-modal" class="settings-modal">
+        <div class="settings-modal-head">
+          <div>
+            <div class="brand-eyebrow">audio</div>
+            <h2 class="settings-title">Settings</h2>
+          </div>
+          <button type="button" id="settings-close-btn" class="settings-close-btn" title="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+          </button>
+        </div>
+        <div class="settings-modal-body">
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-sounds-toggle" />
+            <span>Enable sounds</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-auto-gain-toggle" />
+            <span>Auto gain control</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-echo-cancellation-toggle" />
+            <span>Echo cancellation</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="settings-low-delay-toggle" />
+            <span>Low delay mode</span>
+          </label>
+          <div class="settings-field">
+            <label for="settings-noise-suppression-select">Noise suppression</label>
+            <div class="select-wrap">
+              <select id="settings-noise-suppression-select">
+                <option value="rnnoise">RNNoise</option>
+                <option value="browser">Browser</option>
+                <option value="off">Disabled</option>
+              </select>
+            </div>
+          </div>
+          <div class="settings-field">
+            <label for="settings-bitrate-select">Opus encode bitrate</label>
+            <div class="select-wrap">
+              <select id="settings-bitrate-select">
+                <option value="24000">24 kbps</option>
+                <option value="32000">32 kbps</option>
+                <option value="48000">48 kbps</option>
+                <option value="64000">64 kbps</option>
+                <option value="96000">96 kbps</option>
+                <option value="128000">128 kbps</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="settings-modal-foot">
+          <button type="button" id="settings-done-btn">Done</button>
+        </div>
+      </div>
     </div>
   </div>
 

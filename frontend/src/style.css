@@ -204,12 +204,13 @@ input::placeholder { color: #8a8a8a; }
 }
 .app-actions-divider { width: 1px; height: 32px; background: var(--border); }
 
-/* Header disconnect icon — mobile only (shown in the media query). */
-.disconnect-mobile {
-  display: none; flex-shrink: 0;
-  width: 52px; height: 52px; border-radius: 50%;
+/* Header icon buttons (settings, disconnect) — mobile only (shown in the
+   media query); their labeled desktop equivalents live in .app-actions. */
+.mobile-header-actions { display: none; gap: 12px; flex-shrink: 0; }
+.mobile-header-btn {
+  width: 52px; height: 52px; border-radius: 50%; flex-shrink: 0;
   border: 2px solid #fff; background: none; color: #fff;
-  align-items: center; justify-content: center; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
 }
 
 /* Section headers ("Users" / "Chat"). */
@@ -312,6 +313,49 @@ input::placeholder { color: #8a8a8a; }
 }
 #chat-form button:hover { background: var(--accent-hover); }
 
+/* ==================== SETTINGS MODAL ==================== */
+.settings-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(0, 0, 0, .72);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.settings-modal {
+  width: min(440px, 100%); max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  background: #0c0c0c; border: 1px solid var(--border);
+  display: flex; flex-direction: column;
+}
+.settings-modal-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  padding: 22px 24px 18px; border-bottom: 1px solid #1c1c1c;
+}
+.settings-title { margin: 5px 0 0; font-size: 1.7rem; font-weight: 200; line-height: 1; color: #fff; }
+.settings-close-btn {
+  flex-shrink: 0; width: 34px; height: 34px;
+  background: none; border: none; color: #8a8a8a; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: color .12s;
+}
+.settings-close-btn:hover { color: #fff; }
+.settings-modal-body {
+  display: flex; flex-direction: column; gap: 1.15rem; padding: 22px 24px;
+}
+.settings-modal-body .checkbox-label { margin-bottom: 0; }
+.settings-field label {
+  display: block; margin-bottom: 6px;
+  font-size: .82rem; font-weight: 600; letter-spacing: .02em; color: #b7b7b7;
+}
+.settings-field .select-wrap select { margin-bottom: 0; }
+.settings-modal-foot { padding: 0 24px 22px; }
+#settings-done-btn {
+  width: 100%; padding: .85rem;
+  background: var(--accent); border: none; border-radius: 0;
+  color: #fff; font-size: 1rem; font-weight: 600; letter-spacing: .05em;
+  cursor: pointer; font-family: inherit; transition: background .12s;
+}
+#settings-done-btn:hover { background: var(--accent-hover); }
+#settings-done-btn:active { background: var(--accent-active); }
+
 /* ==================== MOBILE ==================== */
 /* Roster stays persistent and prioritised; voice controls become a centred
    bar; chat collapses into a bottom sheet that never covers the controls. */
@@ -324,7 +368,7 @@ input::placeholder { color: #8a8a8a; }
   .app-bar { order: 0; padding: 26px 24px 12px; align-items: flex-start; }
   .app-brand .brand-eyebrow { font-size: .68rem; }
   .room-title { font-size: 2rem; }
-  .disconnect-mobile { display: flex; }
+  .mobile-header-actions { display: flex; }
 
   /* voice controls: static, centred bar between roster and sheet */
   .app-actions {
@@ -334,7 +378,8 @@ input::placeholder { color: #8a8a8a; }
   }
   .app-actions .ctrl-btn { flex-direction: column; gap: 6px; }
   .app-actions .ctrl-circle { width: 68px; height: 68px; }
-  .app-actions-divider, .ctrl-btn-disconnect { display: none; }  /* disconnect lives in the header on mobile */
+  /* settings and disconnect live in the mobile header instead */
+  .app-actions-divider, .ctrl-btn-disconnect, .ctrl-btn-settings { display: none; }
 
   /* roster fills the space; its "Users" heading stays at the top of the
      section (do not reorder .section-head — it's a child of .users-section) */
