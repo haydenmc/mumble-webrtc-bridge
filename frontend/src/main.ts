@@ -1,5 +1,6 @@
-import { MumbleWebRTCClient, type NoiseSuppressionMode, type RoomEventKind, type UserInfo } from './client'
+import { MumbleWebRTCClient, type RoomEventKind, type UserInfo } from './client'
 import { playSound, setSoundsEnabled } from './sounds'
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, type NoiseSuppressionMode, type Settings } from './settings'
 
 // --- DOM refs ---
 const viewLogin = document.getElementById('view-login')!
@@ -30,11 +31,24 @@ const chatInput = document.getElementById('chat-input') as HTMLInputElement
 const chatPanel = document.querySelector('.chat-panel') as HTMLElement
 const sheetToggle = document.getElementById('sheet-toggle')!
 const sheetLatest = document.getElementById('sheet-latest')!
+const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement
+const settingsBtnMobile = document.getElementById('settings-btn-mobile') as HTMLButtonElement
+const settingsOverlay = document.getElementById('settings-overlay')!
+const settingsModal = document.getElementById('settings-modal')!
+const settingsCloseBtn = document.getElementById('settings-close-btn') as HTMLButtonElement
+const settingsDoneBtn = document.getElementById('settings-done-btn') as HTMLButtonElement
+const settingsSoundsToggle = document.getElementById('settings-sounds-toggle') as HTMLInputElement
+const settingsAutoGainToggle = document.getElementById('settings-auto-gain-toggle') as HTMLInputElement
+const settingsEchoCancellationToggle = document.getElementById('settings-echo-cancellation-toggle') as HTMLInputElement
+const settingsLowDelayToggle = document.getElementById('settings-low-delay-toggle') as HTMLInputElement
+const settingsNoiseSuppressionSelect = document.getElementById('settings-noise-suppression-select') as HTMLSelectElement
+const settingsBitrateSelect = document.getElementById('settings-bitrate-select') as HTMLSelectElement
 
 let client: MumbleWebRTCClient | null = null
 let muted = false
 let deafened = false
 let currentUsername = ''
+let settings: Settings = loadSettings()
 
 // --- Inline SVG icons (stroke inherits currentColor / CSS) ---
 const MIC_SVG =
@@ -69,14 +83,7 @@ function colorFor(name: string): string {
 }
 
 // --- Client setup ---
-function createClient(
-  bitrateBps: number,
-  lowDelay: boolean,
-  noiseSuppressionMode: NoiseSuppressionMode,
-  autoGainControl: boolean,
-  echoCancellation: boolean,
-  joinMuted: boolean,
-): MumbleWebRTCClient {
+function createClient(settings: Settings): MumbleWebRTCClient {
   return new MumbleWebRTCClient(
     {
       onConnected() {
@@ -123,16 +130,11 @@ function createClient(
         showLogin()
       },
     },
+    settings,
     // TURN config — populated via template or env if needed
     [],
     '',
     '',
-    bitrateBps,
-    lowDelay,
-    noiseSuppressionMode,
-    autoGainControl,
-    echoCancellation,
-    joinMuted,
   )
 }
 
@@ -157,81 +159,41 @@ function saveCredentials(username: string, password: string): void {
 
 loadCredentials()
 
-// --- Persist advanced options ---
-const ADVANCED_OPTIONS_STORAGE_KEY = 'mumble-bridge-advanced-options'
-const DEFAULT_BITRATE_BPS = 96000
-
-const VALID_NOISE_SUPPRESSION_MODES: NoiseSuppressionMode[] = ['rnnoise', 'browser', 'off']
-
-function loadAdvancedOptions(): void {
-  try {
-    const saved = localStorage.getItem(ADVANCED_OPTIONS_STORAGE_KEY)
-    if (!saved) return
-    const { bitrateBps, lowDelay, autoGainControl, echoCancellation, noiseSuppressionMode, soundsEnabled, joinMuted } =
-      JSON.parse(saved)
-    if (bitrateBps) bitrateSelect.value = String(bitrateBps)
-    if (lowDelay !== undefined) lowDelayToggle.checked = Boolean(lowDelay)
-    if (autoGainControl !== undefined) autoGainToggle.checked = Boolean(autoGainControl)
-    if (echoCancellation !== undefined) echoCancellationToggle.checked = Boolean(echoCancellation)
-    if (VALID_NOISE_SUPPRESSION_MODES.includes(noiseSuppressionMode)) {
-      noiseSuppressionSelect.value = noiseSuppressionMode
-    }
-    if (soundsEnabled !== undefined) soundsToggle.checked = Boolean(soundsEnabled)
-    if (joinMuted !== undefined) joinMutedToggle.checked = Boolean(joinMuted)
-  } catch {
-    // ignore malformed storage
-  }
-  setSoundsEnabled(soundsToggle.checked)
+// --- Settings (audio config + sounds + join-muted); see settings.ts for the
+// shape, defaults, and persistence. `settings` (declared above) is the single
+// source of truth; the login form and the in-session modal are both just
+// views onto it. ---
+function applySettingsToLoginForm(s: Settings): void {
+  bitrateSelect.value = String(s.bitrateBps)
+  lowDelayToggle.checked = s.lowDelay
+  autoGainToggle.checked = s.autoGainControl
+  echoCancellationToggle.checked = s.echoCancellation
+  noiseSuppressionSelect.value = s.noiseSuppression
+  soundsToggle.checked = s.soundsEnabled
+  joinMutedToggle.checked = s.joinMuted
 }
 
-function saveAdvancedOptions(
-  bitrateBps: number,
-  lowDelay: boolean,
-  autoGainControl: boolean,
-  echoCancellation: boolean,
-  noiseSuppressionMode: NoiseSuppressionMode,
-  soundsEnabled: boolean,
-  joinMuted: boolean,
-): void {
-  localStorage.setItem(
-    ADVANCED_OPTIONS_STORAGE_KEY,
-    JSON.stringify({
-      bitrateBps,
-      lowDelay,
-      autoGainControl,
-      echoCancellation,
-      noiseSuppressionMode,
-      soundsEnabled,
-      joinMuted,
-    }),
-  )
+function applySettingsToModal(s: Settings): void {
+  settingsSoundsToggle.checked = s.soundsEnabled
+  settingsAutoGainToggle.checked = s.autoGainControl
+  settingsEchoCancellationToggle.checked = s.echoCancellation
+  settingsLowDelayToggle.checked = s.lowDelay
+  settingsNoiseSuppressionSelect.value = s.noiseSuppression
+  settingsBitrateSelect.value = String(s.bitrateBps)
 }
 
-loadAdvancedOptions()
+applySettingsToLoginForm(settings)
+setSoundsEnabled(settings.soundsEnabled)
 
 soundsToggle.addEventListener('change', () => {
-  setSoundsEnabled(soundsToggle.checked)
-  saveAdvancedOptions(
-    parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS,
-    lowDelayToggle.checked,
-    autoGainToggle.checked,
-    echoCancellationToggle.checked,
-    noiseSuppressionSelect.value as NoiseSuppressionMode,
-    soundsToggle.checked,
-    joinMutedToggle.checked,
-  )
+  settings = { ...settings, soundsEnabled: soundsToggle.checked }
+  setSoundsEnabled(settings.soundsEnabled)
+  saveSettings(settings)
 })
 
 joinMutedToggle.addEventListener('change', () => {
-  saveAdvancedOptions(
-    parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS,
-    lowDelayToggle.checked,
-    autoGainToggle.checked,
-    echoCancellationToggle.checked,
-    noiseSuppressionSelect.value as NoiseSuppressionMode,
-    soundsToggle.checked,
-    joinMutedToggle.checked,
-  )
+  settings = { ...settings, joinMuted: joinMutedToggle.checked }
+  saveSettings(settings)
 })
 
 // --- Login ---
@@ -241,32 +203,75 @@ loginForm.addEventListener('submit', (e) => {
   const password = passwordInput.value
   if (!username) return
 
-  const bitrateBps = parseInt(bitrateSelect.value, 10) || DEFAULT_BITRATE_BPS
-  const lowDelay = lowDelayToggle.checked
-  const autoGainControl = autoGainToggle.checked
-  const echoCancellation = echoCancellationToggle.checked
-  const noiseSuppressionMode = noiseSuppressionSelect.value as NoiseSuppressionMode
-  const joinMuted = joinMutedToggle.checked
+  settings = {
+    ...settings,
+    bitrateBps: parseInt(bitrateSelect.value, 10) || DEFAULT_SETTINGS.bitrateBps,
+    lowDelay: lowDelayToggle.checked,
+    autoGainControl: autoGainToggle.checked,
+    echoCancellation: echoCancellationToggle.checked,
+    noiseSuppression: noiseSuppressionSelect.value as NoiseSuppressionMode,
+    soundsEnabled: soundsToggle.checked,
+    joinMuted: joinMutedToggle.checked,
+  }
 
   saveCredentials(username, password)
-  saveAdvancedOptions(
-    bitrateBps,
-    lowDelay,
-    autoGainControl,
-    echoCancellation,
-    noiseSuppressionMode,
-    soundsToggle.checked,
-    joinMuted,
-  )
+  saveSettings(settings)
   loginError.classList.add('hidden')
   connectBtn.disabled = true
   connectBtn.textContent = 'Connecting…'
 
   currentUsername = username
-  muted = joinMuted
+  muted = settings.joinMuted
   renderMuteButton()
-  client = createClient(bitrateBps, lowDelay, noiseSuppressionMode, autoGainControl, echoCancellation, joinMuted)
+  client = createClient(settings)
   client.connect(username, password)
+})
+
+// --- Settings modal (in-session; every control applies live) ---
+function openSettings(): void {
+  applySettingsToModal(settings)
+  settingsOverlay.classList.remove('hidden')
+}
+
+function closeSettings(): void {
+  settingsOverlay.classList.add('hidden')
+}
+
+function applySettingChange(patch: Partial<Settings>): void {
+  settings = { ...settings, ...patch }
+  applySettingsToLoginForm(settings)
+  if (patch.soundsEnabled !== undefined) setSoundsEnabled(settings.soundsEnabled)
+  saveSettings(settings)
+  void client?.updateSettings(patch)
+}
+
+settingsBtn.addEventListener('click', openSettings)
+settingsBtnMobile.addEventListener('click', openSettings)
+settingsCloseBtn.addEventListener('click', closeSettings)
+settingsDoneBtn.addEventListener('click', closeSettings)
+settingsOverlay.addEventListener('click', closeSettings)
+settingsModal.addEventListener('click', (e) => e.stopPropagation())
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !settingsOverlay.classList.contains('hidden')) closeSettings()
+})
+
+settingsSoundsToggle.addEventListener('change', () => {
+  applySettingChange({ soundsEnabled: settingsSoundsToggle.checked })
+})
+settingsAutoGainToggle.addEventListener('change', () => {
+  applySettingChange({ autoGainControl: settingsAutoGainToggle.checked })
+})
+settingsEchoCancellationToggle.addEventListener('change', () => {
+  applySettingChange({ echoCancellation: settingsEchoCancellationToggle.checked })
+})
+settingsLowDelayToggle.addEventListener('change', () => {
+  applySettingChange({ lowDelay: settingsLowDelayToggle.checked })
+})
+settingsNoiseSuppressionSelect.addEventListener('change', () => {
+  applySettingChange({ noiseSuppression: settingsNoiseSuppressionSelect.value as NoiseSuppressionMode })
+})
+settingsBitrateSelect.addEventListener('change', () => {
+  applySettingChange({ bitrateBps: parseInt(settingsBitrateSelect.value, 10) || DEFAULT_SETTINGS.bitrateBps })
 })
 
 // --- Mute ---
@@ -364,6 +369,7 @@ function showLogin(): void {
   currentUsername = ''
   renderMuteButton()
   renderDeafenButton()
+  closeSettings()
   chatPanel.classList.remove('open')
   sheetToggle.setAttribute('aria-expanded', 'false')
   setSheetLatest('')

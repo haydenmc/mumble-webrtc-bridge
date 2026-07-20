@@ -1,6 +1,7 @@
 import { MicVAD } from '@ricky0123/vad-web'
 import { NoiseSuppressorWorklet_Name } from '@timephy/rnnoise-wasm'
 import NoiseSuppressorWorkletUrl from '@timephy/rnnoise-wasm/NoiseSuppressorWorklet?worker&url'
+import type { NoiseSuppressionMode, Settings } from './settings'
 
 // Must match remoteTrackSlots in bridge/peer.go: the bridge pre-negotiates
 // this many outbound tracks, one per potential simultaneous Mumble speaker,
@@ -98,11 +99,20 @@ registerProcessor('loudness-processor', LoudnessProcessor)
 `
 
 // applyOpusOptions rewrites the opus fmtp line(s) in an SDP offer before
-// it's sent, pinning constant bitrate at the user-configured value. Applies
-// to every m= section's opus fmtp line rather than just the mic's; the
-// extra ones are on recvonly transceivers that never send anything, so
-// it's a no-op there, not worth the complexity of targeting only the mic's
-// line.
+// it's sent, pinning constant bitrate (cbr=1, matching the native Mumble
+// client) at the user-configured value. Applies only to sections the browser
+// sends on (the mic) — recvonly sections are skipped: their fmtp advertises
+// what the browser accepts on the *receive* path, so stamping the mic's
+// bitrate cap there nominally requests that same cap on incoming audio from
+// other Mumble users (and shows up as a misleading decoder line in
+// about:webrtc). The bridge forwards their raw Opus untouched regardless, so
+// leaving those lines at the browser's defaults is both harmless and honest.
+//
+// Note a CBR Opus encoder fixes its rate when the encoder is *created*, and
+// browsers don't rebuild an already-running encoder when this fmtp is
+// re-munged on a renegotiation — so changing the bitrate live requires
+// building a fresh encoder, i.e. a fresh mic transceiver (see
+// recreateMicTransceiver), not just re-offering with a new value here.
 //
 // When lowDelay is set, also shrinks the Opus frame size (SDP ptime) from
 // the browser's ~20ms default to 10ms. Browsers don't expose libopus's
@@ -126,6 +136,10 @@ function applyOpusOptions(sdp: string, bitrateBps: number, lowDelay: boolean): s
   const sections = sdp.split(/(?=^m=)/im)
   return sections
     .map((section) => {
+      // Only touch sections the browser transmits on (the mic). The remote
+      // playback slots are recvonly; their opus fmtp describes the receive
+      // path, which we don't want to cap.
+      if (/^a=recvonly/im.test(section)) return section
       fmtpLine.lastIndex = 0
       if (!fmtpLine.test(section)) return section
       let result = section.replace(fmtpLine, (_match, prefix: string, params: string) => {
@@ -163,8 +177,6 @@ export interface UserInfo {
 }
 
 export type RoomEventKind = 'joined' | 'left' | 'muted' | 'unmuted' | 'deafened' | 'undeafened'
-
-export type NoiseSuppressionMode = 'rnnoise' | 'browser' | 'off'
 
 export type ServerMsg =
   | { type: 'connected' }
@@ -221,34 +233,52 @@ export class MumbleWebRTCClient {
   private rnnoiseNode: AudioWorkletNode | null = null
   // Fixed onset-protection delay on the transmit path (see TRANSMIT_DELAY_S).
   private delayNode: DelayNode | null = null
+  // Source node for the raw capture stream, kept as a field (rather than a
+  // local in startWebRTC) so updateSettings() can rewire what feeds delayNode
+  // when the noise-suppression mode changes mid-session.
+  private micSource: MediaStreamAudioSourceNode | null = null
   private audioSender: RTCRtpSender | null = null
+  // The mic's outbound transceiver and the MediaStream carrying its processed
+  // send track, both kept so a bitrate/low-delay change can stop this
+  // transceiver and add a fresh one — the only way to rebuild the Opus
+  // encoder (see recreateMicTransceiver). The processed send track itself
+  // (micTrack) and the whole audio graph are reused across the swap.
+  private micTransceiver: RTCRtpTransceiver | null = null
+  private sendStream: MediaStream | null = null
   private audioCtx: AudioContext | null = null
   // Silero VAD, the primary transmit gate. Null when it failed to load and the
   // RMS loudness fallback (loudnessNode) is driving the gate instead.
   private vad: MicVAD | null = null
   private loudnessNode: AudioWorkletNode | null = null
+  // Whichever node (micSource or rnnoiseNode) is currently feeding the RMS
+  // fallback gate — only meaningful while it's active (this.vad === null) —
+  // so updateSettings() can repoint it when noise suppression is rewired.
+  private loudnessTap: AudioNode | null = null
   private loudnessSilenceTimer: number | null = null
   // Whether the active gate (VAD or RMS fallback) currently detects speech.
   private gateOpen = false
   private username = ''
   private selfTalking = false
+  // Serializes the bitrate/low-delay renegotiation on the offer/answer cycle:
+  // WebRTC forbids a second createOffer while the previous offer is still
+  // awaiting its answer (signaling state have-local-offer). negotiationInFlight
+  // stays set from sending an offer until its answer is applied (see
+  // onNegotiationAnswered); negotiationPending coalesces changes that arrive
+  // in that window into a single follow-up renegotiation.
+  private negotiationInFlight = false
+  private negotiationPending = false
 
   constructor(
     private events: ClientEvents,
+    private settings: Settings,
     private turnURLs: string[] = [],
     private turnUsername: string = '',
     private turnCredential: string = '',
-    private opusBitrateBps: number = 96000,
-    private opusLowDelay: boolean = true,
-    private noiseSuppressionMode: NoiseSuppressionMode = 'rnnoise',
-    private autoGainControl: boolean = true,
-    private echoCancellation: boolean = true,
-    private joinMuted: boolean = false,
   ) {
     // Gate transmission from construction time, before connect() even starts
     // capturing the microphone, so a "join muted" request never leaks audio
     // during connection setup.
-    this.manuallyMuted = joinMuted
+    this.manuallyMuted = settings.joinMuted
   }
 
   connect(username: string, password: string): void {
@@ -281,7 +311,7 @@ export class MumbleWebRTCClient {
     switch (msg.type) {
       case 'connected':
         await this.startWebRTC()
-        if (this.joinMuted) this.setMuted(true)
+        if (this.settings.joinMuted) this.setMuted(true)
         this.events.onConnected()
         break
 
@@ -292,6 +322,9 @@ export class MumbleWebRTCClient {
       case 'sdp':
         if (!this.pc) return
         await this.pc.setRemoteDescription({ type: msg.sdpType as RTCSdpType, sdp: msg.sdp })
+        // An applied answer returns signaling to stable, unblocking the next
+        // renegotiation (bitrate/low-delay). No-op for the initial answer.
+        if (msg.sdpType === 'answer') this.onNegotiationAnswered()
         break
 
       case 'ice':
@@ -410,9 +443,9 @@ export class MumbleWebRTCClient {
       // Only ask the browser for noise suppression in 'browser' mode —
       // stacking it with RNNoise introduces musical-noise artifacts.
       audio: {
-        noiseSuppression: this.noiseSuppressionMode === 'browser',
-        echoCancellation: this.echoCancellation,
-        autoGainControl: this.autoGainControl,
+        noiseSuppression: this.settings.noiseSuppression === 'browser',
+        echoCancellation: this.settings.echoCancellation,
+        autoGainControl: this.settings.autoGainControl,
       },
       video: false,
     })
@@ -430,7 +463,7 @@ export class MumbleWebRTCClient {
     // dead loudness gate). connect() runs from a user-gesture submit handler
     // so the context should already start running; this is cheap insurance.
     void this.audioCtx.resume()
-    const micSource = this.audioCtx.createMediaStreamSource(stream)
+    this.micSource = this.audioCtx.createMediaStreamSource(stream)
 
     // Build the send graph. Every noise-suppression mode routes through a
     // MediaStreamAudioDestinationNode now — not just 'rnnoise' — because the
@@ -444,7 +477,7 @@ export class MumbleWebRTCClient {
     //   lead. Latency: ~13-16ms for RNNoise (10ms frame + a quantum or two)
     //   when enabled, plus TRANSMIT_DELAY_S for the delay line.
     let rnnoiseTap: AudioNode | null = null
-    if (this.noiseSuppressionMode === 'rnnoise') {
+    if (this.settings.noiseSuppression === 'rnnoise') {
       try {
         await this.audioCtx.audioWorklet.addModule(NoiseSuppressorWorkletUrl)
         // Force mono I/O. The worklet only ever writes channel 0 of its
@@ -461,7 +494,7 @@ export class MumbleWebRTCClient {
           numberOfOutputs: 1,
           outputChannelCount: [1],
         })
-        micSource.connect(this.rnnoiseNode)
+        this.micSource.connect(this.rnnoiseNode)
         // Gate on the denoised signal so steady background noise (fans,
         // typing) no longer holds the RMS fallback gate open.
         rnnoiseTap = this.rnnoiseNode
@@ -482,10 +515,11 @@ export class MumbleWebRTCClient {
       channelInterpretation: 'speakers',
     })
     const dest = new MediaStreamAudioDestinationNode(this.audioCtx, { channelCount: 1 })
-    ;(rnnoiseTap ?? micSource).connect(this.delayNode)
+    ;(rnnoiseTap ?? this.micSource).connect(this.delayNode)
     this.delayNode.connect(dest)
     const [sendTrack] = dest.stream.getAudioTracks()
     this.micTrack = sendTrack
+    this.sendStream = dest.stream
 
     // addTransceiver (not addTrack) so the mic always gets its own new m=
     // section. addTrack's spec behavior is to *reuse* an existing
@@ -497,17 +531,19 @@ export class MumbleWebRTCClient {
       direction: 'sendrecv',
       streams: [dest.stream],
     })
+    this.pinOpusCodec(transceiver)
+    this.micTransceiver = transceiver
     this.audioSender = transceiver.sender
 
     // Start the primary (Silero) gate on the *raw* capture stream. On failure
     // it falls back to the RMS loudness gate tapping the send-path signal
     // (RNNoise output when enabled, otherwise the raw mic source).
-    await this.startVAD(stream, rnnoiseTap ?? micSource)
+    await this.startVAD(stream, rnnoiseTap ?? this.micSource)
 
     this.updateTransmission()
 
     const offer = await this.pc.createOffer()
-    const sdp = applyOpusOptions(offer.sdp ?? '', this.opusBitrateBps, this.opusLowDelay)
+    const sdp = applyOpusOptions(offer.sdp ?? '', this.settings.bitrateBps, this.settings.lowDelay)
     await this.pc.setLocalDescription({ type: offer.type, sdp })
     this.send({ type: 'sdp', sdpType: 'offer', sdp })
   }
@@ -570,6 +606,7 @@ export class MumbleWebRTCClient {
     }
     this.loudnessNode = new AudioWorkletNode(this.audioCtx!, 'loudness-processor')
     tap.connect(this.loudnessNode)
+    this.loudnessTap = tap
     this.loudnessNode.port.onmessage = (evt: MessageEvent<number>) => {
       const rms = evt.data
       if (rms >= LOUDNESS_THRESHOLD) {
@@ -595,6 +632,194 @@ export class MumbleWebRTCClient {
     if (this.gateOpen === open) return
     this.gateOpen = open
     this.updateTransmission()
+  }
+
+  // Applies a settings change live, mid-session — no reconnect. Merges patch
+  // into the stored settings and, per changed field, uses whichever mechanism
+  // that field actually requires (see the class-level settings fields this
+  // reads from). Fields this client doesn't consume (e.g. soundsEnabled) are
+  // silently ignored — the caller (main.ts) owns those.
+  async updateSettings(patch: Partial<Settings>): Promise<void> {
+    const prev = this.settings
+    const next = { ...prev, ...patch }
+    this.settings = next
+
+    const micConstraintsChanged =
+      next.autoGainControl !== prev.autoGainControl || next.echoCancellation !== prev.echoCancellation
+    const noiseSuppressionChanged = next.noiseSuppression !== prev.noiseSuppression
+    const bitrateChanged = next.bitrateBps !== prev.bitrateBps
+    const lowDelayChanged = next.lowDelay !== prev.lowDelay
+
+    if (noiseSuppressionChanged) {
+      await this.rewireSendGraph(next.noiseSuppression)
+    } else if (micConstraintsChanged) {
+      await this.applyMicConstraints()
+    }
+
+    // Bitrate (CBR) and low-delay (Opus ptime / frame size) are both baked
+    // into the encoder at creation, so changing either live means building a
+    // fresh encoder — done by recreating the mic transceiver and renegotiating
+    // (requestRenegotiation → doRenegotiation → recreateMicTransceiver).
+    if (bitrateChanged || lowDelayChanged) {
+      this.requestRenegotiation()
+    }
+  }
+
+  // Pushes the current autoGainControl/echoCancellation/noiseSuppression
+  // settings onto the live mic track via the standard constrainable-pattern
+  // API — no track replacement, no renegotiation. Safe no-op before connect.
+  private async applyMicConstraints(): Promise<void> {
+    if (!this.rawMicTrack) return
+    try {
+      await this.rawMicTrack.applyConstraints({
+        autoGainControl: this.settings.autoGainControl,
+        echoCancellation: this.settings.echoCancellation,
+        noiseSuppression: this.settings.noiseSuppression === 'browser',
+      })
+    } catch (err) {
+      console.warn('failed to apply mic constraints', err)
+    }
+  }
+
+  // Switches the noise-suppression mode mid-session by rewiring which node
+  // feeds delayNode — micSource directly, or through rnnoiseNode — rather
+  // than replacing the sender's track. The dest track (and thus the RTP
+  // sender) is untouched, so this never needs a renegotiation. The RNNoise
+  // worklet node, once created, is disconnected rather than destroyed when
+  // switching away, so switching back doesn't re-pay the addModule cost.
+  private async rewireSendGraph(mode: NoiseSuppressionMode): Promise<void> {
+    if (!this.audioCtx || !this.micSource || !this.delayNode) return
+
+    this.micSource.disconnect()
+    this.rnnoiseNode?.disconnect()
+
+    let tap: AudioNode = this.micSource
+    if (mode === 'rnnoise') {
+      if (!this.rnnoiseNode) {
+        try {
+          await this.audioCtx.audioWorklet.addModule(NoiseSuppressorWorkletUrl)
+          this.rnnoiseNode = new AudioWorkletNode(this.audioCtx, NoiseSuppressorWorklet_Name, {
+            channelCount: 1,
+            channelCountMode: 'explicit',
+            channelInterpretation: 'speakers',
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+          })
+        } catch (err) {
+          this.rnnoiseNode = null
+          console.warn('RNNoise unavailable, sending raw mic audio', err)
+        }
+      }
+      if (this.rnnoiseNode) {
+        this.micSource.connect(this.rnnoiseNode)
+        tap = this.rnnoiseNode
+      }
+    }
+    tap.connect(this.delayNode)
+
+    // Re-point the RMS fallback gate (only live when the Silero VAD failed to
+    // load) at the new pre-delay tap so it keeps gating on the actual send
+    // signal.
+    if (!this.vad && this.loudnessNode && this.loudnessTap) {
+      this.loudnessTap.disconnect(this.loudnessNode)
+      tap.connect(this.loudnessNode)
+      this.loudnessTap = tap
+    }
+
+    await this.applyMicConstraints()
+  }
+
+  // Requests a bitrate/low-delay renegotiation, coalescing with any already in
+  // flight. A second createOffer while the previous offer awaits its answer is
+  // illegal (signaling state have-local-offer), so if one is in flight we just
+  // mark a change pending; onNegotiationAnswered fires the follow-up once the
+  // answer lands. Since settings already hold the latest values, a single
+  // follow-up captures however many changes piled up in the meantime.
+  private requestRenegotiation(): void {
+    if (this.negotiationInFlight) {
+      this.negotiationPending = true
+      return
+    }
+    void this.doRenegotiation()
+  }
+
+  // Recreates the mic transceiver (fresh Opus encoder) and offers with the
+  // current opus options. Leaves negotiationInFlight set — it's cleared when
+  // the bridge's answer is applied (onNegotiationAnswered). Re-offering is
+  // cheap: the bridge answers a mid-session offer the same way it answers the
+  // initial one (see handleSDP in bridge/peer.go), so this is frontend-only.
+  private async doRenegotiation(): Promise<void> {
+    if (!this.pc) return
+    this.negotiationInFlight = true
+    try {
+      this.recreateMicTransceiver()
+      const offer = await this.pc.createOffer()
+      const sdp = applyOpusOptions(offer.sdp ?? '', this.settings.bitrateBps, this.settings.lowDelay)
+      await this.pc.setLocalDescription({ type: offer.type, sdp })
+      this.send({ type: 'sdp', sdpType: 'offer', sdp })
+    } catch (err) {
+      console.warn('renegotiation failed', err)
+      // Give up on this cycle rather than wedging the state machine; drop any
+      // coalesced change too, since we can't tell how far the offer got.
+      this.negotiationInFlight = false
+      this.negotiationPending = false
+    }
+  }
+
+  // Stops the current mic transceiver and adds a fresh one carrying the same
+  // processed send track. A brand-new transceiver gets a brand-new sender and
+  // encoder, negotiated with the current opus fmtp — the only way to change a
+  // CBR bitrate (or the ptime/frame size) once an encoder exists. The audio
+  // graph (micSource → [RNNoise] → delay → dest) and the send track are all
+  // reused; only the transceiver/encoder is rebuilt. createOffer recycles the
+  // stopped transceiver's m-line on subsequent renegotiations, so the SDP
+  // doesn't grow without bound.
+  private recreateMicTransceiver(): void {
+    if (!this.pc || !this.micTrack) return
+    this.micTransceiver?.stop()
+    const transceiver = this.pc.addTransceiver(this.micTrack, {
+      direction: 'sendrecv',
+      streams: this.sendStream ? [this.sendStream] : [],
+    })
+    this.pinOpusCodec(transceiver)
+    this.micTransceiver = transceiver
+    this.audioSender = transceiver.sender
+    // The new sender starts attached to micTrack; re-assert the current gate
+    // (mute / VAD-closed detaches it) on it.
+    this.updateTransmission()
+  }
+
+  // Restricts a mic transceiver to Opus so codec negotiation can never settle
+  // on anything else. Without this the browser lists all its audio codecs and
+  // the negotiated result depends on payload-type ordering — which shifts when
+  // a transceiver's m-line is recycled on renegotiation, and was landing on
+  // e.g. G.722.1. The bridge relays raw Opus payloads straight to Mumble (no
+  // transcode), so a non-Opus codec reaches other clients as noise. Best-effort:
+  // getCapabilities/setCodecPreferences are absent on older browsers, where the
+  // default order negotiates Opus in practice anyway.
+  private pinOpusCodec(transceiver: RTCRtpTransceiver): void {
+    const caps = RTCRtpSender.getCapabilities?.('audio')
+    if (!caps) return
+    const opus = caps.codecs.filter((c) => c.mimeType.toLowerCase() === 'audio/opus')
+    if (opus.length === 0) return
+    try {
+      transceiver.setCodecPreferences(opus)
+    } catch (err) {
+      console.warn('failed to pin Opus codec', err)
+    }
+  }
+
+  // Called after an answer is applied (signaling back to stable): unblocks the
+  // next renegotiation and fires a coalesced follow-up if one piled up. A
+  // no-op for the initial connect answer (nothing was in flight).
+  private onNegotiationAnswered(): void {
+    if (!this.negotiationInFlight) return
+    this.negotiationInFlight = false
+    if (this.negotiationPending) {
+      this.negotiationPending = false
+      this.requestRenegotiation()
+    }
   }
 
   // Native Mumble clients treat "deafened but not muted" as an invalid
@@ -687,6 +912,8 @@ export class MumbleWebRTCClient {
     this.gateOpen = false
     this.selfTalking = false
     this.audioSender = null
+    this.micTransceiver = null
+    this.sendStream = null
     // Safe to destroy: pauseStream is our no-op (won't stop the shared mic)
     // and we don't own the AudioContext passed in, so destroy() won't close it.
     void this.vad?.destroy()
@@ -694,10 +921,15 @@ export class MumbleWebRTCClient {
     this.loudnessNode?.port.close()
     this.loudnessNode?.disconnect()
     this.loudnessNode = null
+    this.loudnessTap = null
     this.delayNode?.disconnect()
     this.delayNode = null
     this.rnnoiseNode?.disconnect()
     this.rnnoiseNode = null
+    this.micSource?.disconnect()
+    this.micSource = null
+    this.negotiationInFlight = false
+    this.negotiationPending = false
     void this.audioCtx?.close()
     this.audioCtx = null
     this.micTrack?.stop()
