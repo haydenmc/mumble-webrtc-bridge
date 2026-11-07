@@ -13,7 +13,7 @@ build:
 generate-proto:
 	podman run --rm -v $(CURDIR):/app:Z -w /app golang:1.26-alpine sh -c '\
 		apk add --no-cache protobuf-dev >/dev/null && \
-		go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11 && \
+		go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12 && \
 		export PATH=/root/go/bin:$$PATH && \
 		protoc --go_out=. --go_opt=paths=source_relative internal/mumble/MumbleProto/Mumble.proto'
 

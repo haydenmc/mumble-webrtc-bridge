@@ -19,7 +19,7 @@ ARG TARGETARCH
 # google.golang.org/protobuf version in go.mod (keep in sync with the
 # "generate-proto" Makefile target, which uses the same version).
 RUN apk add --no-cache ca-certificates protobuf-dev
-RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
 ENV PATH="/root/go/bin:${PATH}"
 WORKDIR /app
 COPY go.mod go.sum ./

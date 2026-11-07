@@ -14,7 +14,7 @@
     "vite": "^6.4.5"
   },
   "dependencies": {
-    "@ricky0123/vad-web": "^0.0.30",
+    "@ricky0123/vad-web": "^0.0.31",
     "@timephy/rnnoise-wasm": "1.0.0"
   }
 }
