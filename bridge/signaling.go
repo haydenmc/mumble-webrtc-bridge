@@ -102,8 +102,19 @@ type errorMsg struct {
 	Message string `json:"message"`
 }
 
+// connectedMsg tells the browser the Mumble login succeeded and it should
+// start WebRTC, using IceServers (STUN plus any TURN, with per-session
+// credentials when TURN_SECRET is configured).
 type connectedMsg struct {
-	Type string `json:"type"`
+	Type       string          `json:"type"`
+	IceServers []iceServerInfo `json:"iceServers"`
+}
+
+// iceServerInfo is the wire form of an RTCIceServer.
+type iceServerInfo struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
 }
 
 func mustMarshal(v any) []byte {

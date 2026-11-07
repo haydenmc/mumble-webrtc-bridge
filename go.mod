@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/pion/ice/v4 v4.2.7
 	github.com/pion/rtp v1.10.2
 	github.com/pion/webrtc/v4 v4.2.16
 	google.golang.org/protobuf v1.36.11
@@ -13,7 +14,6 @@ require (
 require (
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.4 // indirect
-	github.com/pion/ice/v4 v4.2.7 // indirect
 	github.com/pion/interceptor v0.1.45 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect

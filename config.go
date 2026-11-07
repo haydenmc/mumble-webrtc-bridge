@@ -23,9 +23,15 @@ type Config struct {
 	BridgeTitle string
 	BridgeAbout string
 
+	// TURN servers are handed to both the bridge's own pion peer and the
+	// browser (via the "connected" signaling message). TURNSecret, when set,
+	// is coturn's static-auth-secret: per-session, time-limited credentials
+	// are minted from it (TURN REST API scheme) and the static
+	// TURNUsername/TURNCredential are ignored.
 	TURNURLs       []string
 	TURNUsername   string
 	TURNCredential string
+	TURNSecret     string
 
 	// MumbleForceTCP disables the UDP voice channel, keeping audio on the
 	// TCP tunnel. A bisection tool for diagnosing transport-specific audio
@@ -41,6 +47,11 @@ type Config struct {
 	// `-p 50000-50100:50000-50100/udp`.
 	WebRTCUDPPortMin uint16
 	WebRTCUDPPortMax uint16
+
+	// WebRTCTCPPort, when non-zero, enables ICE-TCP: the bridge listens on
+	// this TCP port and advertises passive TCP host candidates, so browsers
+	// on networks that block UDP can still reach it directly.
+	WebRTCTCPPort uint16
 
 	HTTPAddr string
 	TLSCert  string
@@ -80,6 +91,7 @@ func loadConfig() (*Config, error) {
 	}
 	cfg.TURNUsername = os.Getenv("TURN_USERNAME")
 	cfg.TURNCredential = os.Getenv("TURN_CREDENTIAL")
+	cfg.TURNSecret = os.Getenv("TURN_SECRET")
 
 	if addr := os.Getenv("HTTP_ADDR"); addr != "" {
 		cfg.HTTPAddr = addr
@@ -106,6 +118,14 @@ func loadConfig() (*Config, error) {
 		}
 		cfg.WebRTCUDPPortMin = portMin
 		cfg.WebRTCUDPPortMax = portMax
+	}
+
+	if p := os.Getenv("WEBRTC_TCP_PORT"); p != "" {
+		port, err := parsePort(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid WEBRTC_TCP_PORT: %w", err)
+		}
+		cfg.WebRTCTCPPort = port
 	}
 
 	return cfg, nil

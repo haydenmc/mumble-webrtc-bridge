@@ -90,6 +90,9 @@ function createClient(settings: Settings): MumbleWebRTCClient {
         playSound('join')
         showRoom()
       },
+      onStatus(text) {
+        connectBtn.textContent = text
+      },
       onError(msg) {
         showLoginError(msg)
         connectBtn.disabled = false
@@ -131,10 +134,6 @@ function createClient(settings: Settings): MumbleWebRTCClient {
       },
     },
     settings,
-    // TURN config — populated via template or env if needed
-    [],
-    '',
-    '',
   )
 }
 

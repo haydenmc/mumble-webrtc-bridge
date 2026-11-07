@@ -63,6 +63,13 @@ const LOUDNESS_REDEMPTION_MS = 500
 // halving it directly shaves latency off every onset.
 const LOUDNESS_WORKLET_WINDOW_SAMPLES = 256
 
+// How long ICE gets to reach "connected" after the offer is sent before we
+// give up and show an error. Generous enough for a slow TURN/TCP fallback
+// (candidate pairs are tried in priority order, so relay pairs are
+// typically last), short enough that a blocked user isn't left staring at
+// "Connecting voice…". The bridge has its own, longer backstop.
+const ICE_CONNECT_TIMEOUT_MS = 15000
+
 // Runs on the dedicated audio rendering thread, not the main thread, so
 // unlike a setInterval/AnalyserNode poll it (a) never misses any audio —
 // every sample delivered gets included in exactly one RMS window, versus
@@ -168,6 +175,34 @@ function applyOpusOptions(sdp: string, bitrateBps: number, lowDelay: boolean): s
     .join('')
 }
 
+// Thrown by startWebRTC when RTCPeerConnection is missing or unusable —
+// some privacy extensions and hardened browser configs disable it outright.
+class WebRTCUnavailableError extends Error {}
+
+// Maps an exception from voice setup (mostly getUserMedia's DOMExceptions)
+// to a user-facing message.
+function describeSetupError(err: unknown): string {
+  console.warn('voice setup failed', err)
+  if (err instanceof WebRTCUnavailableError) {
+    return (
+      'WebRTC is disabled in this browser, so voice cannot connect. A privacy extension ' +
+      'or browser setting is the likely cause — try allowing WebRTC for this site.'
+    )
+  }
+  const name = err instanceof DOMException ? err.name : ''
+  switch (name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return 'Microphone access was denied. Allow microphone access for this site and try again.'
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return 'No microphone was found. Connect a microphone and try again.'
+    case 'NotReadableError':
+      return 'The microphone could not be opened — it may be in use by another application.'
+  }
+  return `Voice setup failed: ${err instanceof Error ? err.message : String(err)}`
+}
+
 export interface UserInfo {
   name: string
   muted: boolean
@@ -179,7 +214,7 @@ export interface UserInfo {
 export type RoomEventKind = 'joined' | 'left' | 'muted' | 'unmuted' | 'deafened' | 'undeafened'
 
 export type ServerMsg =
-  | { type: 'connected' }
+  | { type: 'connected'; iceServers?: RTCIceServer[] }
   | { type: 'error'; message: string }
   | { type: 'sdp'; sdpType: string; sdp: string }
   | { type: 'ice'; candidate: string; sdpMid: string; sdpMLineIndex: number }
@@ -193,7 +228,10 @@ export type ServerMsg =
   | { type: 'room_event'; kind: RoomEventKind; username: string }
 
 export interface ClientEvents {
+  // Fired once voice (the WebRTC peer connection) is actually up, not when
+  // the Mumble login succeeds — see onStatus for progress before that.
   onConnected: () => void
+  onStatus: (text: string) => void
   onError: (msg: string) => void
   onText: (from: string, message: string) => void
   onUserList: (users: UserInfo[]) => void
@@ -267,13 +305,21 @@ export class MumbleWebRTCClient {
   // in that window into a single follow-up renegotiation.
   private negotiationInFlight = false
   private negotiationPending = false
+  // Voice connection bookkeeping: whether the peer connection has reached
+  // "connected" yet (onConnected fires once, on that transition), the setup
+  // timeout, whether the server handed us any TURN server, and a summary of
+  // the local ICE candidates gathered — used to diagnose why ICE failed.
+  private voiceConnected = false
+  private iceTimeout: number | null = null
+  private hasTURN = false
+  private localCandidates: { type: string; protocol: string }[] = []
+  // Set once fail() has run, so a later server error or WS close can't
+  // overwrite the (more specific) message it showed.
+  private failed = false
 
   constructor(
     private events: ClientEvents,
     private settings: Settings,
-    private turnURLs: string[] = [],
-    private turnUsername: string = '',
-    private turnCredential: string = '',
   ) {
     // Gate transmission from construction time, before connect() even starts
     // capturing the microphone, so a "join muted" request never leaks audio
@@ -293,6 +339,14 @@ export class MumbleWebRTCClient {
     }
 
     this.ws.onclose = () => {
+      // Once voice setup has started, an unexpected close (bridge restart,
+      // network drop) is a failure the user should hear about. Before that,
+      // the login error path (onerror / a server 'error' message) has
+      // already reported whatever went wrong.
+      if (this.pc) {
+        this.fail('Lost connection to the bridge server')
+        return
+      }
       this.cleanup()
       this.events.onDisconnected()
     }
@@ -310,13 +364,27 @@ export class MumbleWebRTCClient {
   private async handleServerMsg(msg: ServerMsg): Promise<void> {
     switch (msg.type) {
       case 'connected':
-        await this.startWebRTC()
+        this.events.onStatus('Connecting voice…')
+        try {
+          await this.startWebRTC(msg.iceServers ?? [{ urls: 'stun:stun.l.google.com:19302' }])
+        } catch (err) {
+          this.fail(describeSetupError(err))
+          return
+        }
         if (this.settings.joinMuted) this.setMuted(true)
-        this.events.onConnected()
         break
 
       case 'error':
-        this.events.onError(msg.message)
+        // Once voice is being set up, a server error ends the session; route
+        // it through fail() so the message survives the teardown. The bridge's
+        // own ICE failure/timeout reports ("voice connection …") get the same
+        // client-side diagnosis as a locally detected failure.
+        if (this.pc) {
+          if (!msg.message.startsWith('voice connection')) this.fail(msg.message)
+          else this.fail(this.voiceConnected ? 'Voice connection lost' : this.diagnoseICEFailure(msg.message))
+        } else {
+          this.events.onError(msg.message)
+        }
         break
 
       case 'sdp':
@@ -374,20 +442,26 @@ export class MumbleWebRTCClient {
     }
   }
 
-  private async startWebRTC(): Promise<void> {
-    const iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }]
-    if (this.turnURLs.length > 0) {
-      iceServers.push({
-        urls: this.turnURLs,
-        username: this.turnUsername,
-        credential: this.turnCredential,
-      })
+  private async startWebRTC(iceServers: RTCIceServer[]): Promise<void> {
+    this.hasTURN = iceServers.some((s) =>
+      (Array.isArray(s.urls) ? s.urls : [s.urls]).some((u) => /^turns?:/i.test(u)),
+    )
+    if (typeof RTCPeerConnection === 'undefined') {
+      throw new WebRTCUnavailableError()
     }
-
-    this.pc = new RTCPeerConnection({ iceServers })
+    try {
+      this.pc = new RTCPeerConnection({ iceServers })
+    } catch (err) {
+      console.warn('RTCPeerConnection construction failed', err)
+      throw new WebRTCUnavailableError()
+    }
 
     this.pc.onicecandidate = (evt) => {
       if (!evt.candidate) return
+      this.localCandidates.push({
+        type: evt.candidate.type ?? 'unknown',
+        protocol: evt.candidate.protocol ?? 'unknown',
+      })
       this.send({
         type: 'ice',
         candidate: evt.candidate.candidate,
@@ -422,12 +496,18 @@ export class MumbleWebRTCClient {
     }
 
     this.pc.onconnectionstatechange = () => {
-      if (
-        this.pc?.connectionState === 'failed' ||
-        this.pc?.connectionState === 'closed'
-      ) {
+      const state = this.pc?.connectionState
+      if (state === 'connected' && !this.voiceConnected) {
+        this.voiceConnected = true
+        this.clearICETimeout()
+        this.events.onConnected()
+      } else if (state === 'failed') {
+        this.fail(this.voiceConnected ? 'Voice connection lost' : this.diagnoseICEFailure())
+      } else if (state === 'closed') {
         this.disconnect()
       }
+      // 'disconnected' is deliberately ignored: it's transient, and ICE may
+      // recover. If it doesn't, it escalates to 'failed'.
     }
 
     // Pre-negotiate one recvonly slot per pooled bridge track, in addition
@@ -546,6 +626,65 @@ export class MumbleWebRTCClient {
     const sdp = applyOpusOptions(offer.sdp ?? '', this.settings.bitrateBps, this.settings.lowDelay)
     await this.pc.setLocalDescription({ type: offer.type, sdp })
     this.send({ type: 'sdp', sdpType: 'offer', sdp })
+
+    this.iceTimeout = window.setTimeout(() => {
+      this.iceTimeout = null
+      if (!this.voiceConnected) this.fail(this.diagnoseICEFailure())
+    }, ICE_CONNECT_TIMEOUT_MS)
+  }
+
+  private clearICETimeout(): void {
+    if (this.iceTimeout !== null) {
+      clearTimeout(this.iceTimeout)
+      this.iceTimeout = null
+    }
+  }
+
+  // Picks a user-facing explanation for a voice connection that never came
+  // up, based on which local ICE candidates the browser managed to gather.
+  // Browser policies that restrict WebRTC to proxied/relayed traffic (set by
+  // some privacy extensions and VPN clients) suppress candidate gathering
+  // entirely when no TURN relay is available, which is distinguishable from
+  // a network that gathered candidates but couldn't reach the bridge. (An
+  // mDNS-only host candidate list is *not* treated as a policy block: that's
+  // also what a normal browser gathers on a network that blocks UDP/STUN.)
+  private diagnoseICEFailure(serverReason?: string): string {
+    console.warn('voice connection failed', {
+      serverReason,
+      hasTURN: this.hasTURN,
+      localCandidates: this.localCandidates,
+    })
+    const hasRelay = this.localCandidates.some((c) => c.type === 'relay')
+    if (this.localCandidates.length === 0) {
+      return (
+        'Could not establish a voice connection: your browser did not offer any network ' +
+        'addresses for WebRTC. A VPN, privacy extension, or browser setting that blocks ' +
+        'WebRTC is the likely cause — try allowing WebRTC for this site.'
+      )
+    }
+    if (!hasRelay && !this.hasTURN) {
+      return (
+        'Could not establish a voice connection: the voice server is unreachable from your ' +
+        'network (UDP and TCP may be blocked, or a VPN may be interfering). Ask the server ' +
+        'operator to configure a TURN relay, or try a different network.'
+      )
+    }
+    return (
+      'Could not establish a voice connection: the voice server is unreachable from your ' +
+      'network, even through the relay. Try a different network or disable your VPN.'
+    )
+  }
+
+  // The single failure path for the voice session: tears everything down and
+  // reports msg, guarded against running twice (and against a later server
+  // error or WS close replacing msg with a less specific one).
+  private fail(msg: string): void {
+    if (this.failed) return
+    this.failed = true
+    this.detachWS()
+    this.cleanup()
+    this.events.onError(msg)
+    this.events.onDisconnected()
   }
 
   // Starts the Silero VAD on the raw capture stream. The VAD builds its own
@@ -898,12 +1037,25 @@ export class MumbleWebRTCClient {
     this.send({ type: 'text', message })
   }
 
+  // User-initiated (or pc 'closed') teardown. Detaches the WS handlers first
+  // so the resulting close isn't mistaken for an unexpected drop.
   disconnect(): void {
+    this.detachWS()
     this.cleanup()
     this.events.onDisconnected()
   }
 
+  private detachWS(): void {
+    if (!this.ws) return
+    this.ws.onmessage = null
+    this.ws.onclose = null
+    this.ws.onerror = null
+  }
+
   private cleanup(): void {
+    this.clearICETimeout()
+    this.voiceConnected = false
+    this.localCandidates = []
     if (this.loudnessSilenceTimer !== null) {
       clearTimeout(this.loudnessSilenceTimer)
       this.loudnessSilenceTimer = null
