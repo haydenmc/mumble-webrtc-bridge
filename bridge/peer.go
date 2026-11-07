@@ -51,6 +51,13 @@ const opusClockRate = 48000
 // extreme lateness and inflates NetEq's adaptive playout delay toward ~1s.
 const rtpGapThreshold = 100 * time.Millisecond
 
+// iceConnectTimeout is a server-side backstop: if the browser's peer
+// connection hasn't reached "connected" this long after setup, give up and
+// tell the browser why. The browser has its own, shorter timeout that
+// normally fires first with a more specific diagnosis; this one covers a
+// browser that never even sends an offer.
+const iceConnectTimeout = 30 * time.Second
+
 // trackSlot binds one pooled outbound WebRTC track to whichever Mumble
 // session is currently occupying it (session 0 means free).
 type trackSlot struct {
@@ -83,6 +90,9 @@ type Peer struct {
 	wsMu sync.Mutex // serializes WebSocket writes
 
 	pc *webrtc.PeerConnection
+	// iceServers is computed once per peer (TURN REST credentials embed an
+	// expiry) and shared by the pion peer and the browser.
+	iceServers []webrtc.ICEServer
 
 	mumble *mumble.Client
 
@@ -266,30 +276,40 @@ func (p *Peer) handleLogin(username, password string) error {
 	}
 
 	// Set up WebRTC peer connection.
+	p.iceServers = p.srv.iceServersFor(p.id)
 	if err := p.setupWebRTC(); err != nil {
 		p.sendWS(mustMarshal(errorMsg{Type: "error", Message: "webrtc setup: " + err.Error()}))
 		return nil
 	}
 
-	// Notify browser that Mumble connection succeeded.
-	p.sendWS(mustMarshal(connectedMsg{Type: "connected"}))
+	// Notify browser that Mumble connection succeeded, handing it the same
+	// ICE servers the bridge uses.
+	p.sendWS(mustMarshal(connectedMsg{Type: "connected", IceServers: toICEServerInfos(p.iceServers)}))
 	return nil
 }
 
-func (p *Peer) setupWebRTC() error {
-	iceServers := []webrtc.ICEServer{
-		{URLs: []string{"stun:stun.l.google.com:19302"}},
+func toICEServerInfos(servers []webrtc.ICEServer) []iceServerInfo {
+	infos := make([]iceServerInfo, len(servers))
+	for i, s := range servers {
+		cred, _ := s.Credential.(string)
+		infos[i] = iceServerInfo{URLs: s.URLs, Username: s.Username, Credential: cred}
 	}
-	if len(p.srv.ice.TURNURLs) > 0 {
-		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs:           p.srv.ice.TURNURLs,
-			Username:       p.srv.ice.TURNUsername,
-			Credential:     p.srv.ice.TURNCredential,
-			CredentialType: webrtc.ICECredentialTypePassword,
+	return infos
+}
+
+func (p *Peer) setupWebRTC() error {
+	se := webrtc.SettingEngine{}
+	if mux := p.srv.tcpMux; mux != nil {
+		// ICE-TCP: advertise a passive TCP host candidate on the shared
+		// listener alongside the usual UDP candidates, for browsers whose
+		// network blocks UDP. NAT1To1IPs (below) rewrites it like the UDP
+		// host candidates.
+		se.SetICETCPMux(mux)
+		se.SetNetworkTypes([]webrtc.NetworkType{
+			webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6,
+			webrtc.NetworkTypeTCP4, webrtc.NetworkTypeTCP6,
 		})
 	}
-
-	se := webrtc.SettingEngine{}
 	if host := p.srv.ice.BridgeHost; host != "" {
 		se.SetNAT1To1IPs([]string{host}, webrtc.ICECandidateTypeHost)
 	}
@@ -300,7 +320,7 @@ func (p *Peer) setupWebRTC() error {
 	}
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
-		ICEServers: iceServers,
+		ICEServers: p.iceServers,
 	})
 	if err != nil {
 		return err
@@ -367,13 +387,37 @@ func (p *Peer) setupWebRTC() error {
 		}))
 	})
 
+	// connected is closed the first time the peer connection reaches
+	// "connected", disarming the setup timeout below.
+	connected := make(chan struct{})
+	var connectedOnce sync.Once
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		if state == webrtc.PeerConnectionStateFailed ||
-			state == webrtc.PeerConnectionStateClosed ||
-			state == webrtc.PeerConnectionStateDisconnected {
+		log.Printf("peer %s: webrtc connection state %s", p.id, state)
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			connectedOnce.Do(func() { close(connected) })
+		case webrtc.PeerConnectionStateFailed:
+			// Tell the browser why before tearing down, rather than just
+			// dropping the WebSocket. "disconnected" is deliberately not
+			// handled: it's transient and ICE may recover; if it doesn't,
+			// it escalates to "failed".
+			p.sendWS(mustMarshal(errorMsg{Type: "error", Message: "voice connection failed"}))
+			p.close()
+		case webrtc.PeerConnectionStateClosed:
 			p.close()
 		}
 	})
+
+	go func() {
+		select {
+		case <-connected:
+		case <-p.closeCh:
+		case <-time.After(iceConnectTimeout):
+			log.Printf("peer %s: webrtc not connected after %s, giving up", p.id, iceConnectTimeout)
+			p.sendWS(mustMarshal(errorMsg{Type: "error", Message: "voice connection timed out"}))
+			p.close()
+		}
+	}()
 
 	go p.reapSlots()
 

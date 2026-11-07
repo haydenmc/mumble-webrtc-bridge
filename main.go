@@ -25,14 +25,19 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	srv := bridge.NewServer(cfg.MumbleAddr(), cfg.MumbleChannel, bridge.ICEConfig{
+	srv, err := bridge.NewServer(cfg.MumbleAddr(), cfg.MumbleChannel, bridge.ICEConfig{
 		BridgeHost:     cfg.BridgeHost,
 		TURNURLs:       cfg.TURNURLs,
 		TURNUsername:   cfg.TURNUsername,
 		TURNCredential: cfg.TURNCredential,
+		TURNSecret:     cfg.TURNSecret,
 		UDPPortMin:     cfg.WebRTCUDPPortMin,
 		UDPPortMax:     cfg.WebRTCUDPPortMax,
+		TCPPort:        cfg.WebRTCTCPPort,
 	}, cfg.MumbleForceTCP)
+	if err != nil {
+		log.Fatalf("bridge setup error: %v", err)
+	}
 
 	// Serve compiled frontend. index.html is a template so operators can
 	// brand the page via BRIDGE_TITLE/BRIDGE_ABOUT; everything else is
