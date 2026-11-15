@@ -39,6 +39,16 @@ const slotReapInterval = 250 * time.Millisecond
 // actually speaking.
 const talkIdleTimeout = 300 * time.Millisecond
 
+// spurtEndTimeout is how long the browser's outbound audio can go quiet
+// before the bridge ends the Mumble talk spurt with a terminator frame. The
+// browser's VAD gate stops RTP entirely when it closes (replaceTrack(null)),
+// so silence on the bridge's side is the only end-of-spurt signal. Some
+// Mumble clients (e.g. blurt) clear their talking indicator only on a
+// terminator, so without one the user looks like they're always talking.
+// Well above the 20ms packet interval so ordinary jitter doesn't split a
+// spurt.
+const spurtEndTimeout = 150 * time.Millisecond
+
 // opusClockRate is the RTP clock rate for Opus (always 48kHz, regardless of
 // the actual audio sample rate) used to derive RTP timestamp increments.
 const opusClockRate = 48000
@@ -98,6 +108,13 @@ type Peer struct {
 
 	muted  atomic.Bool
 	seqNum atomic.Int64
+
+	// Outbound talk-spurt state. spurtMu serializes audio writes with the
+	// terminator written by endSpurt, so the two can never interleave or
+	// share a sequence number.
+	spurtMu    sync.Mutex
+	spurtTimer *time.Timer
+	inSpurt    bool
 
 	// slotsReady guards against Mumble audio arriving (on the mumble.Client's
 	// internal goroutine, which can run concurrently with handleLogin/
@@ -666,7 +683,9 @@ func (p *Peer) reapSlots() {
 // reconstruction — those were all tried, one at a time and in combination,
 // while chasing an intermittent stutter, and none of it fixed the stutter.
 // Deliberately going back to the simplest possible version so any further
-// investigation starts from a known-plain baseline.
+// investigation starts from a known-plain baseline. The only addition is the
+// end-of-spurt terminator (see spurtEndTimeout/endSpurt), which never touches
+// the audio frames themselves.
 func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 	for {
 		rtp, _, err := track.ReadRTP()
@@ -692,11 +711,39 @@ func (p *Peer) readBrowserAudio(track *webrtc.TrackRemote) {
 		if len(rtp.Payload) == 0 {
 			units = 0
 		}
+		p.spurtMu.Lock()
 		seq := p.seqNum.Add(units) - units
-		if err := p.mumble.WriteAudioPacket(0, seq, false, rtp.Payload); err != nil {
+		err = p.mumble.WriteAudioPacket(0, seq, false, rtp.Payload)
+		if err == nil {
+			p.inSpurt = true
+			if p.spurtTimer == nil {
+				p.spurtTimer = time.AfterFunc(spurtEndTimeout, p.endSpurt)
+			} else {
+				p.spurtTimer.Reset(spurtEndTimeout)
+			}
+		}
+		p.spurtMu.Unlock()
+		if err != nil {
 			log.Printf("peer %s: write audio: %v", p.id, err)
 			return
 		}
+	}
+}
+
+// endSpurt ends the current outbound talk spurt with an empty terminator
+// frame (final bit set, no payload) once browser audio has been quiet for
+// spurtEndTimeout. The terminator takes its own sequence number, so the next
+// spurt's first frame never duplicates it.
+func (p *Peer) endSpurt() {
+	p.spurtMu.Lock()
+	defer p.spurtMu.Unlock()
+	if !p.inSpurt || p.mumble == nil {
+		return
+	}
+	p.inSpurt = false
+	seq := p.seqNum.Add(1) - 1
+	if err := p.mumble.WriteAudioPacket(0, seq, true, nil); err != nil {
+		log.Printf("peer %s: write spurt terminator: %v", p.id, err)
 	}
 }
 
@@ -719,6 +766,12 @@ func (p *Peer) sendWS(data []byte) {
 func (p *Peer) close() {
 	p.closeOnce.Do(func() {
 		close(p.closeCh)
+		p.spurtMu.Lock()
+		p.inSpurt = false
+		if p.spurtTimer != nil {
+			p.spurtTimer.Stop()
+		}
+		p.spurtMu.Unlock()
 		if p.pc != nil {
 			_ = p.pc.Close()
 		}
